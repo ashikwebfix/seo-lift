@@ -130,7 +130,7 @@ export function validateUrlHandle(value) {
   
   const valid =
     handleStr === clean &&
-    handleStr.length >= 3 &&
+    handleStr.length >= 1 &&
     handleStr.length <= 45 &&
     validPattern.test(handleStr);
 
@@ -139,7 +139,7 @@ export function validateUrlHandle(value) {
     normalized: clean,
     message: valid
       ? ""
-      : "URL handle must be lowercase, hyphenated, and 3-45 characters.",
+      : "URL handle must be lowercase, hyphenated, and 1-45 characters.",
   };
 }
 

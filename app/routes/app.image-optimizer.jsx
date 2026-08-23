@@ -473,7 +473,8 @@ export default function ImageOptimizerRoute() {
   const liveStatusTone = actionFetcher.data?.error ? "critical" : actionBusy ? "warning" : "ok";
 
   return (
-    <s-page full-width="true" heading="Image Optimizer">
+    <>
+      <ui-title-bar title="Image Optimizer" />
       <div className="seo-wrap seo-grid">
         {pageData.configError ? <div className="error-box">{pageData.configError}</div> : null}
         {localError ? <div className="error-box">{localError}</div> : null}
@@ -762,6 +763,6 @@ export default function ImageOptimizerRoute() {
           )}
         </div>
       </div>
-    </s-page>
+        </>
   );
 }

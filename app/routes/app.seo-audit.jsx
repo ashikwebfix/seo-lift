@@ -68,7 +68,8 @@ export default function SeoAuditRoute() {
   const isSubmitting = navigation.state === "submitting";
 
   return (
-    <s-page full-width="true" heading="SEO Audit / Scan">
+    <>
+      <ui-title-bar title="SEO Audit / Scan" />
       <div className="seo-wrap seo-grid">
         {data.configError ? <div className="error-box">{data.configError}</div> : null}
         {actionData?.error ? <div className="error-box">{actionData.error}</div> : null}
@@ -120,6 +121,6 @@ export default function SeoAuditRoute() {
           </div>
         )}
       </div>
-    </s-page>
+        </>
   );
 }

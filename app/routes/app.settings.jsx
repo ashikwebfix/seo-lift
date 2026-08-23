@@ -119,7 +119,8 @@ export default function SettingsRoute() {
   const isSubmitting = navigation.state === "submitting";
 
   return (
-    <s-page full-width="true" heading="Settings">
+    <>
+      <ui-title-bar title="Settings" />
       <div className="seo-wrap seo-grid">
         {data.hidden ? (
           <section className="section-card">
@@ -213,6 +214,6 @@ export default function SettingsRoute() {
           </>
         ) : null}
       </div>
-    </s-page>
+        </>
   );
 }

@@ -44,7 +44,8 @@ export default function BillingReturnPage() {
   const hasTrial = isPro && (subscription?.trialDays ?? 0) > 0;
 
   return (
-    <s-page full-width="true" heading="Billing Confirmation">
+    <>
+      <ui-title-bar title="Billing Confirmation" />
       <div className="seo-wrap seo-grid">
         {configError ? <div className="error-box">{configError}</div> : null}
 
@@ -92,6 +93,6 @@ export default function BillingReturnPage() {
           )}
         </div>
       </div>
-    </s-page>
+        </>
   );
 }

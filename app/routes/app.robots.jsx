@@ -90,7 +90,8 @@ export default function RobotsRoute() {
   }
 
   return (
-    <s-page full-width="true" heading="Robots.txt Manager">
+    <>
+      <ui-title-bar title="Robots.txt Manager" />
       <div className="seo-wrap seo-grid">
         {data.configError ? <div className="error-box">{data.configError}</div> : null}
         {fetcher.data?.error ? <div className="error-box">{fetcher.data.error}</div> : null}
@@ -115,6 +116,6 @@ export default function RobotsRoute() {
           {fetcher.data?.rationale ? <p style={{ margin: 0 }}>{fetcher.data.rationale}</p> : null}
         </div>
       </div>
-    </s-page>
+        </>
   );
 }

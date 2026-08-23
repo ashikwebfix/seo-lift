@@ -150,7 +150,8 @@ export default function BulkMetaRoute() {
   }
 
   return (
-    <s-page full-width="true" heading="Bulk Meta Editor">
+    <>
+      <ui-title-bar title="Bulk Meta Editor" />
       <div className="seo-wrap seo-grid">
         {data.configError ? <div className="error-box">{data.configError}</div> : null}
 
@@ -224,6 +225,6 @@ export default function BulkMetaRoute() {
           </div>
         )}
       </div>
-    </s-page>
+        </>
   );
 }

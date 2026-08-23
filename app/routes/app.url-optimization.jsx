@@ -110,7 +110,8 @@ export default function UrlOptimizationRoute() {
   }
 
   return (
-    <s-page full-width="true" heading="URL Optimization">
+    <>
+      <ui-title-bar title="URL Optimization" />
       <div className="seo-wrap seo-grid">
         {data.configError ? <div className="error-box">{data.configError}</div> : null}
 
@@ -143,7 +144,7 @@ export default function UrlOptimizationRoute() {
                   const currentNewHandle = getHandleToApply(row);
                   const isDirty = row.handle !== currentNewHandle;
                   return (
-                    <tr key={row.id} style={{ background: isDirty ? "rgba(223, 243, 241, 0.3)" : "transparent" }}>
+                    <tr key={row.id} style={{ background: isDirty ? "rgba(255, 244, 229, 0.6)" : "transparent" }}>
                       <td>
                         <input
                           type="checkbox"
@@ -182,6 +183,6 @@ export default function UrlOptimizationRoute() {
           </div>
         )}
       </div>
-    </s-page>
+        </>
   );
 }

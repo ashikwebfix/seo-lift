@@ -148,7 +148,8 @@ export default function BillingPage() {
     const status = subscription?.status || "ACTIVE";
 
     return (
-      <s-page full-width="true" heading="Billing & Plan">
+      <>
+      <ui-title-bar title="Billing & Plan" />
         <div className="seo-wrap seo-grid">
           {configError ? <div className="error-box">{configError}</div> : null}
 
@@ -199,13 +200,14 @@ export default function BillingPage() {
             </div>
           </div>
         </div>
-      </s-page>
+          </>
     );
   }
 
   // ── Plan picker ───────────────────────────────────────────────────────────
   return (
-    <s-page full-width="true" heading="Choose Your Plan">
+    <>
+      <ui-title-bar title="Choose Your Plan" />
       <div className="seo-wrap">
         {configError ? <div className="error-box" style={{ marginBottom: "16px" }}>{configError}</div> : null}
 
@@ -271,6 +273,6 @@ export default function BillingPage() {
           </div>
         </div>
       </div>
-    </s-page>
+        </>
   );
 }

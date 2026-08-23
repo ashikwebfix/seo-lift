@@ -56,7 +56,8 @@ export default function DashboardPage() {
   const latestScores = chartScoreHistory.slice(-8);
 
   return (
-    <s-page full-width="true" heading="Ecom SEO Dashboard">
+    <>
+      <ui-title-bar title="Ecom SEO Dashboard" />
       <div className="seo-wrap seo-grid">
         {configError ? <div className="error-box">{configError}</div> : null}
         {scanError ? <div className="error-box">{scanError}</div> : null}
@@ -100,7 +101,7 @@ export default function DashboardPage() {
           <FeatureCard title="Sitemap Manager" description="Regenerate sitemap URL inventory with manual additions." to="/app/sitemap" />
         </div>
       </div>
-    </s-page>
+        </>
   );
 }
 

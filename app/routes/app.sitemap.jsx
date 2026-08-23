@@ -63,7 +63,8 @@ export default function SitemapRoute() {
   }
 
   return (
-    <s-page full-width="true" heading="Sitemap Manager">
+    <>
+      <ui-title-bar title="Sitemap Manager" />
       <div className="seo-wrap seo-grid">
         {data.configError ? <div className="error-box">{data.configError}</div> : null}
         {fetcher.data?.error ? <div className="error-box">{fetcher.data.error}</div> : null}
@@ -103,6 +104,6 @@ export default function SitemapRoute() {
           </div>
         )}
       </div>
-    </s-page>
+        </>
   );
 }

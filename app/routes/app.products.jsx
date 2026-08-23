@@ -392,7 +392,8 @@ export default function ProductSeoRoute() {
   }
 
   return (
-    <s-page full-width="true" heading="Product SEO Management">
+    <>
+      <ui-title-bar title="Product SEO Management" />
       <div className="seo-wrap seo-grid">
         {pageData.configError ? <div className="error-box">{pageData.configError}</div> : null}
 
@@ -587,6 +588,6 @@ export default function ProductSeoRoute() {
           ) : null}
         </div>
       </div>
-    </s-page>
+        </>
   );
 }

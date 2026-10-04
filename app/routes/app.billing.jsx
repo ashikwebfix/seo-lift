@@ -89,7 +89,7 @@ export const action = async ({ request }) => {
   }
 
   const returnUrl = `https://${shop}/admin/apps/${process.env.SHOPIFY_API_KEY}/app`;
-  const test = false;
+  const test = true;
 
   const currencyCode = await getShopCurrencyCode({
     admin,

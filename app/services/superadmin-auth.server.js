@@ -204,7 +204,7 @@ export async function getAuthenticatedSuperAdmin(request) {
 
   if (!session || new Date() >= new Date(session.expiresAt) || !session.user?.isActive) {
     if (session) {
-      await prisma.superAdminSession.delete({ where: { id: session.id } }).catch(() => {});
+      await prisma.superAdminSession.delete({ where: { id: session.id } }).catch(() => { });
     }
     return null;
   }
@@ -240,7 +240,7 @@ export async function destroySuperAdminSession(request) {
   const rawToken = cookies[COOKIE_NAME];
   if (rawToken) {
     const tokenHash = hashSessionToken(rawToken);
-    await prisma.superAdminSession.deleteMany({ where: { tokenHash } }).catch(() => {});
+    await prisma.superAdminSession.deleteMany({ where: { tokenHash } }).catch(() => { });
   }
   return [
     buildCookieHeader("", 0, request, "/"),

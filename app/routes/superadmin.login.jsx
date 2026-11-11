@@ -68,7 +68,6 @@ export default function SuperAdminLoginPage() {
               type="text"
               required
               autoComplete="username"
-              placeholder="ecomfixr"
               className="sa-input"
             />
           </div>

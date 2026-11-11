@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useFetcher, useLoaderData } from "react-router";
 import seoStyles from "../styles/seo.css?url";
+import { AiDiffInspector, WorkspaceSubnav, dispatchCreditsUpdate } from "../components/seo-ui";
+import { showToast } from "../components/toast-viewport";
 import { loadProductsPage, saveProductSeoAndRescan } from "../services/seo-workflows.server";
 import { requireShopContext } from "../services/route-context.server";
 import { AI_FEATURES_ENABLED } from "../utils/feature-flags";
+import { CREDIT_COSTS } from "../utils/credits.js";
 import {
+  evaluateOnPageSeoSignals,
+  normalizeHandle,
+  sanitizeProductDescriptionHtml,
+  stripHtmlTags,
   validateFocusKeyword,
   validateMetaDescription,
   validateMetaTitle,
+  validateProductDescription,
   validateProductTitle,
   validateUrlHandle,
 } from "../validators/seoValidators";
@@ -24,6 +32,7 @@ export const loader = async ({ request }) => {
   if (configError) {
     return {
       configError,
+      shop: shop || "",
       query,
       focusId,
       rows: [],
@@ -31,23 +40,35 @@ export const loader = async ({ request }) => {
     };
   }
 
-  const result = await loadProductsPage({
-    shop,
-    storeDomain: shop,
-    token,
-    apiVersion,
-    query,
-    pageInfo,
-    limit: 20,
-  });
+  try {
+    const result = await loadProductsPage({
+      shop,
+      storeDomain: shop,
+      token,
+      apiVersion,
+      query,
+      pageInfo,
+      limit: 20,
+    });
 
-  return {
-    configError: "",
-    query,
-    focusId,
-    rows: result.rows,
-    pagination: result.pagination,
-  };
+    return {
+      configError: "",
+      shop: shop || "",
+      query,
+      focusId,
+      rows: result.rows,
+      pagination: result.pagination,
+    };
+  } catch (error) {
+    return {
+      configError: error?.message || "Unable to load Shopify products.",
+      shop: shop || "",
+      query,
+      focusId,
+      rows: [],
+      pagination: { nextPageInfo: "", previousPageInfo: "" },
+    };
+  }
 };
 
 export function shouldRevalidate({ formMethod, defaultShouldRevalidate }) {
@@ -162,6 +183,7 @@ function getLiveValidation(row) {
     metaTitle: validateMetaTitle(row.metaTitle),
     metaDescription: validateMetaDescription(row.metaDescription),
     handle: validateUrlHandle(row.handle),
+    description: validateProductDescription(row.descriptionHtml || "", row.focusKeyword || ""),
   };
 }
 
@@ -174,6 +196,11 @@ function getIssueItems(validation) {
   if (!validation.metaDescription.valid) items.push({ tone: "critical", label: validation.metaDescription.message });
   if (validation.metaDescription.valid && !validation.metaDescription.ideal) items.push({ tone: "warning", label: "Meta description is outside ideal length (120-155)." });
   if (!validation.handle.valid) items.push({ tone: "critical", label: validation.handle.message });
+  if (!validation.description.valid) {
+    items.push({ tone: "critical", label: validation.description.message });
+  } else if (!validation.description.ideal && validation.description.message) {
+    items.push({ tone: "warning", label: validation.description.message });
+  }
   return items;
 }
 
@@ -186,14 +213,15 @@ function getHealthStatus(validation) {
     validation.handle.valid,
     Boolean(validation.metaTitle.ideal),
     Boolean(validation.metaDescription.ideal),
+    Boolean(validation.description.valid && validation.description.wordCount >= 80),
   ];
   const passed = checks.filter(Boolean).length;
   const percent = Math.round((passed / checks.length) * 100);
 
-  if (checks.slice(0, 5).some((item) => !item)) {
+  if (checks.slice(0, 5).some((item) => !item) || !validation.description.valid) {
     return { tone: "red", label: "Needs fixes", percent };
   }
-  if (!validation.metaTitle.ideal || !validation.metaDescription.ideal) {
+  if (!validation.metaTitle.ideal || !validation.metaDescription.ideal || !validation.description.ideal) {
     return { tone: "orange", label: "Good, can improve", percent };
   }
   return { tone: "green", label: "Healthy", percent };
@@ -229,8 +257,42 @@ function getLengthState(value, rules) {
 
 function getChangedFieldCount(row, original) {
   if (!original) return 0;
-  const keys = ["title", "focusKeyword", "metaTitle", "metaDescription", "handle"];
+  const keys = ["title", "focusKeyword", "metaTitle", "metaDescription", "handle", "descriptionHtml"];
   return keys.filter((key) => String(row[key] || "") !== String(original[key] || "")).length;
+}
+
+function buildMinorSeoPatch(row, { preserveHandle = true } = {}) {
+  const cleanSpace = (text) => String(text || "").replace(/\s+/g, " ").trim();
+  const nextTitle = cleanSpace(row.title);
+  let nextKeyword = cleanSpace(row.focusKeyword);
+  if (!nextKeyword && nextTitle) {
+    nextKeyword = nextTitle.split(/\s+/).slice(0, 4).join(" ").slice(0, 40).trim();
+  }
+
+  let nextMetaTitle = cleanSpace(row.metaTitle);
+  if (!nextMetaTitle && nextTitle) {
+    nextMetaTitle = `${nextTitle}${nextKeyword ? ` | ${nextKeyword}` : ""}`.slice(0, 60).trim();
+  }
+
+  let nextMetaDescription = cleanSpace(row.metaDescription);
+  if (!nextMetaDescription) {
+    const plainBody = stripHtmlTags(row.descriptionHtml || "");
+    const baseText = plainBody || `${nextTitle}. Quality craft, fast shipping, and dependable value for everyday buyers.`;
+    nextMetaDescription = baseText.slice(0, 155).trim();
+  }
+
+  const nextHandle =
+    preserveHandle && validateUrlHandle(row.handle || "").valid
+      ? row.handle
+      : normalizeHandle(row.handle || nextTitle);
+
+  return {
+    title: nextTitle,
+    focusKeyword: nextKeyword,
+    metaTitle: nextMetaTitle,
+    metaDescription: nextMetaDescription,
+    handle: nextHandle,
+  };
 }
 
 export default function ProductSeoRoute() {
@@ -240,21 +302,29 @@ export default function ProductSeoRoute() {
   const aiFetcher = useFetcher();
   const [pageData, setPageData] = useState(() => ({
     configError: data.configError || "",
+    shop: data.shop || "",
     query: data.query || "",
     focusId: data.focusId || "",
     rows: data.rows || [],
     pagination: data.pagination || { nextPageInfo: "", previousPageInfo: "" },
   }));
   const [searchQuery, setSearchQuery] = useState(data.query || "");
+  const [listFilter, setListFilter] = useState("all");
   const { rows, patchRow, clearRow } = useDraftStore(pageData.rows || []);
   const [openRowId, setOpenRowId] = useState(data.focusId || "");
   const [savingRowId, setSavingRowId] = useState("");
   const [aiRowId, setAiRowId] = useState("");
+  const [aiActionLabel, setAiActionLabel] = useState("");
   const [lastAiAppliedRowId, setLastAiAppliedRowId] = useState("");
+  const [aiNotesById, setAiNotesById] = useState({});
+  const [auditResultsById, setAuditResultsById] = useState({});
+  const [previewDescById, setPreviewDescById] = useState({});
+  const [preserveHandleById, setPreserveHandleById] = useState({});
 
   const syncPageData = useCallback((nextData) => {
     setPageData({
       configError: nextData.configError || "",
+      shop: nextData.shop || "",
       query: nextData.query || "",
       focusId: nextData.focusId || "",
       rows: nextData.rows || [],
@@ -280,6 +350,10 @@ export default function ProductSeoRoute() {
 
       if (pageData.focusId && pageData.rows.some((row) => row.id === pageData.focusId)) {
         return pageData.focusId;
+      }
+
+      if (pageData.rows.length === 1) {
+        return pageData.rows[0].id;
       }
 
       if (!current) return "";
@@ -313,6 +387,11 @@ export default function ProductSeoRoute() {
       }));
       clearRow(productId);
       setSavingRowId("");
+      showToast({
+        tone: "success",
+        title: "Product SEO Saved",
+        message: `Saved "${normalized.title || "Product"}"${saveFetcher.data.redirectCreated ? " and created 301 redirect" : ""}.`,
+      });
     }
     if (saveFetcher.data?.error) {
       setSavingRowId("");
@@ -320,14 +399,75 @@ export default function ProductSeoRoute() {
   }, [saveFetcher.data, clearRow]);
 
   useEffect(() => {
+    if (aiFetcher.data?.ok && aiFetcher.data?.creditsRemaining !== undefined) {
+      dispatchCreditsUpdate({
+        availableCredits: aiFetcher.data.creditsRemaining,
+        plan: aiFetcher.data.plan,
+        superAccess: Boolean(aiFetcher.data.superAccess),
+      });
+    }
     if (aiFetcher.data?.ok && aiFetcher.data?.actionType === "product_seo_fix" && aiRowId) {
-      patchRow(aiRowId, aiFetcher.data.result || {});
+      const result = aiFetcher.data.result || {};
+      const patch = {
+        title: result.title,
+        focusKeyword: result.focusKeyword,
+        handle: result.handle,
+        metaTitle: result.metaTitle,
+        metaDescription: result.metaDescription,
+        ...(typeof result.descriptionHtml === "string" && result.descriptionHtml
+          ? { descriptionHtml: result.descriptionHtml }
+          : {}),
+      };
+      patchRow(aiRowId, patch);
+      if (result.rationale) {
+        setAiNotesById((current) => ({ ...current, [aiRowId]: result.rationale }));
+      }
       setLastAiAppliedRowId(aiRowId);
       setAiRowId("");
+      setAiActionLabel("");
+      showToast({
+        tone: "info",
+        title: "AI SEO Suggestion Ready",
+        message: result.rationale || "Gemini SEO & content fields populated. Review and click Save Product SEO.",
+      });
+    }
+
+    if (aiFetcher.data?.ok && aiFetcher.data?.actionType === "product_content_fix" && aiRowId) {
+      const result = aiFetcher.data.result || {};
+      if (typeof result.descriptionHtml === "string") {
+        patchRow(aiRowId, { descriptionHtml: result.descriptionHtml });
+      }
+      if (result.summary) {
+        setAiNotesById((current) => ({ ...current, [aiRowId]: result.summary }));
+      }
+      setLastAiAppliedRowId(aiRowId);
+      setAiRowId("");
+      setAiActionLabel("");
+      showToast({
+        tone: "info",
+        title: "Product Copy Updated",
+        message: result.summary || "Gemini improved product description HTML. Review and save to Shopify.",
+      });
+    }
+
+    if (aiFetcher.data?.ok && aiFetcher.data?.actionType === "audit_change" && aiRowId) {
+      setAuditResultsById((current) => ({
+        ...current,
+        [aiRowId]: aiFetcher.data.result,
+      }));
+      setLastAiAppliedRowId(aiRowId);
+      setAiRowId("");
+      setAiActionLabel("");
+      showToast({
+        tone: "info",
+        title: "AI Impact Analysis Complete",
+        message: aiFetcher.data.result?.verdict || "Review the Gemini Diff Audit card below.",
+      });
     }
 
     if (aiFetcher.data?.error) {
       setAiRowId("");
+      setAiActionLabel("");
     }
   }, [aiFetcher.data, aiRowId, patchRow]);
 
@@ -368,62 +508,185 @@ export default function ProductSeoRoute() {
 
   function saveRow(row) {
     setSavingRowId(row.id);
+    const original = originalById[row.id] || {};
     saveFetcher.submit(
-      { payload: JSON.stringify(row) },
+      {
+        payload: JSON.stringify({
+          ...row,
+          originalHandle: original.handle || "",
+          previousValues: original,
+          aiVerdict: auditResultsById[row.id] || null,
+        }),
+      },
       { method: "post" },
     );
   }
 
-  function runAiFix(row) {
+  function isHandleLocked(row) {
+    if (preserveHandleById[row.id] !== undefined) {
+      return preserveHandleById[row.id];
+    }
+    return validateUrlHandle(originalById[row.id]?.handle || row.handle || "").valid;
+  }
+
+  function runAiFix(row, mode = "full") {
+    const keepHandle = isHandleLocked(row);
     setAiRowId(row.id);
+    setAiActionLabel(mode === "minor" ? "minor" : "full");
     aiFetcher.submit(
       {
         payload: JSON.stringify({
           actionType: "product_seo_fix",
+          mode,
+          preserveHandle: keepHandle,
+          productId: row.id,
           title: row.title,
           focusKeyword: row.focusKeyword,
           handle: row.handle,
           metaTitle: row.metaTitle,
           metaDescription: row.metaDescription,
+          descriptionHtml: row.descriptionHtml || "",
+          productType: row.productType || "",
+          tags: row.tags || "",
         }),
       },
       { method: "post", action: "/app/api/ai" },
     );
   }
 
+  function runAiContentFix(row, goal = "polish") {
+    setAiRowId(row.id);
+    setAiActionLabel(`content_${goal}`);
+    aiFetcher.submit(
+      {
+        payload: JSON.stringify({
+          actionType: "product_content_fix",
+          goal,
+          productId: row.id,
+          title: row.title,
+          focusKeyword: row.focusKeyword,
+          descriptionHtml: row.descriptionHtml || "",
+          productType: row.productType || "",
+          tags: row.tags || "",
+        }),
+      },
+      { method: "post", action: "/app/api/ai" },
+    );
+  }
+
+  function runAiAudit(row) {
+    setAiRowId(row.id);
+    setAiActionLabel("audit");
+    const original = originalById[row.id] || {};
+    aiFetcher.submit(
+      {
+        payload: JSON.stringify({
+          actionType: "audit_change",
+          productId: row.id,
+          title: row.title,
+          currentValues: original,
+          newValues: row,
+        }),
+      },
+      { method: "post", action: "/app/api/ai" },
+    );
+  }
+
+  function applyLocalMinorTuneUp(row) {
+    const patch = buildMinorSeoPatch(row, { preserveHandle: isHandleLocked(row) });
+    patchRow(row.id, patch);
+    showToast({
+      tone: "info",
+      title: "Minor SEO Tune-Up Applied",
+      message: "Cleaned spacing, filled missing essentials, and preserved existing copy. Click Save to apply.",
+    });
+  }
+
+  function applyCleanSlug(row) {
+    const cleanSlug = normalizeHandle(row.handle || row.title || "");
+    patchRow(row.id, { handle: cleanSlug });
+  }
+
+  function revertDraft(rowId) {
+    clearRow(rowId);
+    setAiNotesById((current) => {
+      const next = { ...current };
+      delete next[rowId];
+      return next;
+    });
+    showToast({
+      tone: "info",
+      title: "Draft Reverted",
+      message: "Restored product fields to saved Shopify values.",
+    });
+  }
+
+  const filteredRows = useMemo(() => {
+    return rows.filter((row) => {
+      if (listFilter === "all") return true;
+      const validation = getLiveValidation(row);
+      const changed = getChangedFieldCount(row, originalById[row.id]) > 0;
+      if (listFilter === "unsaved") return changed;
+      if (listFilter === "thin_copy") return validation.description.wordCount < 80;
+      if (listFilter === "needs_fix") return getIssueItems(validation).length > 0;
+      return true;
+    });
+  }, [rows, listFilter, originalById]);
+
   return (
     <>
-      <ui-title-bar title="Product SEO Management" />
+      <ui-title-bar title="Products & Media — Product SEO" />
       <div className="seo-wrap seo-grid">
+        <WorkspaceSubnav group="products" />
         {pageData.configError ? <div className="error-box">{pageData.configError}</div> : null}
 
-        <form method="get" className="toolbar" onSubmit={handleSearchSubmit}>
-          <input
-            className="seo-input"
-            name="q"
-            placeholder="Search product title"
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            style={{ maxWidth: 320 }}
-          />
-          <button className="seo-button" type="submit" disabled={listFetcher.state !== "idle"}>
-            {listFetcher.state !== "idle" ? "Searching..." : "Search"}
-          </button>
-          <Link to="/app">Dashboard</Link>
-        </form>
+        <div className="toolbar" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+          <form method="get" style={{ display: "flex", gap: 8, flex: "1 1 320px", alignItems: "center" }} onSubmit={handleSearchSubmit}>
+            <input
+              className="seo-input"
+              name="q"
+              placeholder="Search product title..."
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              style={{ maxWidth: 320 }}
+            />
+            <button className="seo-button" type="submit" disabled={listFetcher.state !== "idle"}>
+              {listFetcher.state !== "idle" ? "Searching..." : "Search"}
+            </button>
+          </form>
+
+          <div className="filter-pills" role="group" aria-label="Quick product SEO filter">
+            {[
+              { id: "all", label: `All (${rows.length})` },
+              { id: "needs_fix", label: "Needs Fixes" },
+              { id: "thin_copy", label: "Thin Copy (<80w)" },
+              { id: "unsaved", label: "Unsaved Drafts" },
+            ].map((pill) => (
+              <button
+                key={pill.id}
+                type="button"
+                className={`filter-pill${listFilter === pill.id ? " active" : ""}`}
+                onClick={() => setListFilter(pill.id)}
+              >
+                {pill.label}
+              </button>
+            ))}
+          </div>
+        </div>
 
         {saveFetcher.data?.error ? <div className="error-box">{saveFetcher.data.error}</div> : null}
         {aiFetcher.data?.error ? <div className="error-box">{aiFetcher.data.error}</div> : null}
 
-        {!rows.length ? (
+        {!filteredRows.length ? (
           <div className="empty-box">No products found for the current filter.</div>
         ) : (
           <div className="table-card product-list-card">
             <div className="product-list">
-              {rows.map((row) => {
+              {filteredRows.map((row) => {
                 const validation = getLiveValidation(row);
                 const issues = getIssueItems(validation);
                 const health = getHealthStatus(validation);
+                const signals = evaluateOnPageSeoSignals(row);
                 const isOpen = openRowId === row.id;
                 const changedCount = getChangedFieldCount(row, originalById[row.id]);
                 const titleLen = getLengthState(row.title, { min: 25, max: 70 });
@@ -431,16 +694,33 @@ export default function ProductSeoRoute() {
                 const metaTitleLen = getLengthState(row.metaTitle, { idealMin: 45, idealMax: 60, hardMax: 65 });
                 const metaDescriptionLen = getLengthState(row.metaDescription, { idealMin: 120, idealMax: 155, hardMax: 160 });
                 const handleLen = getLengthState(row.handle, { min: 3, max: 45 });
+                const handleLocked = isHandleLocked(row);
+                const isAiBusy = aiFetcher.state !== "idle" && aiRowId === row.id;
+                const showPreview = Boolean(previewDescById[row.id]);
+                const serpHost = pageData.shop || "your-store.myshopify.com";
+                const serpTitle = String(row.metaTitle || row.title || "Untitled Product").trim();
+                const serpDesc =
+                  String(row.metaDescription || "").trim() ||
+                  stripHtmlTags(row.descriptionHtml || "").slice(0, 155) ||
+                  "Add a compelling 120-155 character meta description to improve organic CTR from Google Search.";
 
                 return (
                   <article key={row.id} className={`product-list-item${isOpen ? " open" : ""}`}>
                     <button type="button" className="product-list-head" onClick={() => setOpenRowId(isOpen ? "" : row.id)}>
                       <div className="product-head-main">
                         <h4>{row.title || "Untitled product"}</h4>
-                        <small>/products/{row.handle || "no-handle"}</small>
+                        <small>
+                          /products/{row.handle || "no-handle"} · {validation.description.wordCount} words
+                          {row.productType ? ` · ${row.productType}` : ""}
+                        </small>
                       </div>
 
                       <div className="product-head-side">
+                        {changedCount > 0 ? (
+                          <span className="issue-chip neutral" title="You have unsaved edits for this product">
+                            {changedCount} Unsaved
+                          </span>
+                        ) : null}
                         <span className={`live-health-pill ${health.tone}`}>{health.label}</span>
                         <div className="row-issues-box">
                           {issues.length ? (
@@ -464,16 +744,91 @@ export default function ProductSeoRoute() {
                       <div className="product-edit-panel">
                         <div className="live-health-block">
                           <div className="live-health-head">
-                            <strong>Live SEO Status</strong>
-                            <span className={`health-text ${health.tone}`}>{health.percent}%</span>
+                            <strong>Live On-Page SEO Score ({signals.passedCount}/{signals.totalCount} signals)</strong>
+                            <span className={`health-text ${health.tone}`}>{signals.scorePercent}%</span>
                           </div>
                           <div className="live-health-track">
-                            <div className={`live-health-bar ${health.tone}`} style={{ width: `${health.percent}%` }} />
+                            <div className={`live-health-bar ${health.tone}`} style={{ width: `${signals.scorePercent}%` }} />
                           </div>
                           <div className="live-info-grid">
                             <small>{issues.length ? `${issues.length} active issue${issues.length > 1 ? "s" : ""}` : "No active SEO issues."}</small>
-                            <small>{changedCount ? `${changedCount} unsaved field change${changedCount > 1 ? "s" : ""}` : "No unsaved changes."}</small>
+                            <small>{changedCount ? `${changedCount} unsaved change${changedCount > 1 ? "s" : ""}` : "Synced with Shopify"}</small>
                           </div>
+                          <div className="signal-chips">
+                            {[
+                              { label: "Keyword in Title", passed: signals.keywordInTitle },
+                              { label: "Keyword in Meta Title", passed: signals.keywordInMetaTitle },
+                              { label: "Keyword in Meta Desc", passed: signals.keywordInMetaDescription },
+                              { label: "Keyword in URL", passed: signals.keywordInHandle },
+                              { label: "Keyword in Content", passed: signals.keywordInDescription },
+                              {
+                                label: `${validation.description.wordCount}w Content`,
+                                passed: validation.description.wordCount >= 80 && validation.description.hasStructure,
+                              },
+                            ].map((chip) => (
+                              <span key={chip.label} className={`signal-chip ${chip.passed ? "pass" : "miss"}`}>
+                                {chip.passed ? "✓" : "○"} {chip.label}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Live Google Search Snippet Preview */}
+                        <div className="serp-preview-box" aria-label="Google search snippet preview">
+                          <div className="serp-preview-label">Google SERP Live Preview</div>
+                          <div className="serp-preview-url">
+                            https://{serpHost} › products › {row.handle || "handle"}
+                          </div>
+                          <div className="serp-preview-title">
+                            {serpTitle.length > 60 ? `${serpTitle.slice(0, 60)}...` : serpTitle}
+                          </div>
+                          <div className="serp-preview-desc">
+                            {serpDesc.length > 155 ? `${serpDesc.slice(0, 155)}...` : serpDesc}
+                          </div>
+                        </div>
+
+                        {/* Quick Minor Change & Safe Lock Controls */}
+                        <div className="minor-tune-bar">
+                          <div className="minor-tune-buttons">
+                            <button
+                              type="button"
+                              className="seo-button secondary small-btn"
+                              onClick={() => applyLocalMinorTuneUp(row)}
+                              title="Cleans spaces & populates missing meta/keyword without replacing valid copy"
+                            >
+                              🧹 Quick Minor Tune-Up (Free)
+                            </button>
+                            <button
+                              type="button"
+                              className="seo-button secondary small-btn"
+                              onClick={() => applyCleanSlug(row)}
+                              title="Format URL handle cleanly lowercase-hyphenated"
+                            >
+                              🔗 Format Slug
+                            </button>
+                            {changedCount > 0 ? (
+                              <button
+                                type="button"
+                                className="seo-button secondary small-btn"
+                                onClick={() => revertDraft(row.id)}
+                              >
+                                ↺ Discard Unsaved ({changedCount})
+                              </button>
+                            ) : null}
+                          </div>
+                          <label className="safe-lock-toggle">
+                            <input
+                              type="checkbox"
+                              checked={handleLocked}
+                              onChange={(event) =>
+                                setPreserveHandleById((current) => ({
+                                  ...current,
+                                  [row.id]: event.target.checked,
+                                }))
+                              }
+                            />
+                            <span>Lock existing URL handle (skip 301 change)</span>
+                          </label>
                         </div>
 
                         <div className="editor-grid">
@@ -504,6 +859,15 @@ export default function ProductSeoRoute() {
                             </div>
                           </label>
 
+                          <label className="editor-field">
+                            <span>URL Handle</span>
+                            <input className="seo-input" value={row.handle} onChange={(event) => patchRow(row.id, { handle: event.target.value })} />
+                            <div className="field-meta">
+                              <small className={`counter ${handleLen.tone}`}>{handleLen.label}</small>
+                              <small className="field-status">{fieldStatusMessage(validation.handle)}</small>
+                            </div>
+                          </label>
+
                           <label className="editor-field editor-field-wide">
                             <span>Meta Description</span>
                             <textarea
@@ -518,15 +882,101 @@ export default function ProductSeoRoute() {
                             </div>
                           </label>
 
-                          <label className="editor-field">
-                            <span>URL Handle</span>
-                            <input className="seo-input" value={row.handle} onChange={(event) => patchRow(row.id, { handle: event.target.value })} />
-                            <div className="field-meta">
-                              <small className={`counter ${handleLen.tone}`}>{handleLen.label}</small>
-                              <small className="field-status">{fieldStatusMessage(validation.handle)}</small>
+                          <div className="editor-field editor-field-wide">
+                            <div className="content-editor-header">
+                              <span>Product Description Content (Shopify HTML)</span>
+                              <div className="content-ai-bar">
+                                <button
+                                  type="button"
+                                  className={`filter-pill${!showPreview ? " active" : ""}`}
+                                  onClick={() => setPreviewDescById((c) => ({ ...c, [row.id]: false }))}
+                                >
+                                  HTML Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`filter-pill${showPreview ? " active" : ""}`}
+                                  onClick={() => setPreviewDescById((c) => ({ ...c, [row.id]: true }))}
+                                >
+                                  Preview
+                                </button>
+                                {AI_FEATURES_ENABLED ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      className="seo-button secondary small-btn"
+                                      disabled={isAiBusy}
+                                      onClick={() => runAiContentFix(row, "polish")}
+                                      title={`Minor grammar & natural keyword polish preserving specs (${CREDIT_COSTS.product_content_fix} tokens)`}
+                                    >
+                                      {isAiBusy && aiActionLabel === "content_polish"
+                                        ? "Polishing..."
+                                        : `✨ Polish Copy (${CREDIT_COSTS.product_content_fix} tok)`}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="seo-button secondary small-btn"
+                                      disabled={isAiBusy}
+                                      onClick={() => runAiContentFix(row, "structure")}
+                                      title={`Add H3 headings & scannable bullets without altering facts (${CREDIT_COSTS.product_content_fix} tokens)`}
+                                    >
+                                      {isAiBusy && aiActionLabel === "content_structure"
+                                        ? "Formatting..."
+                                        : `📝 Add Bullets (${CREDIT_COSTS.product_content_fix} tok)`}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="seo-button secondary small-btn"
+                                      disabled={isAiBusy}
+                                      onClick={() => runAiContentFix(row, "expand")}
+                                      title={`Write complete 120-190w conversion SEO copy from product details (${CREDIT_COSTS.product_content_expand} tokens)`}
+                                    >
+                                      {isAiBusy && aiActionLabel === "content_expand"
+                                        ? "Writing..."
+                                        : `✍️ Write Full Copy (${CREDIT_COSTS.product_content_expand} tok)`}
+                                    </button>
+                                  </>
+                                ) : null}
+                              </div>
                             </div>
-                          </label>
+
+                            {showPreview ? (
+                              <div
+                                className="description-preview-box"
+                                dangerouslySetInnerHTML={{
+                                  __html:
+                                    sanitizeProductDescriptionHtml(row.descriptionHtml || "") ||
+                                    "<p><em>No product description yet. Use AI Write Full Copy or switch to HTML Edit.</em></p>",
+                                }}
+                              />
+                            ) : (
+                              <textarea
+                                className="seo-textarea"
+                                rows={6}
+                                placeholder="<p>Write SEO-rich product overview, <h3>Key Features</h3>, and bullet highlights...</p>"
+                                value={row.descriptionHtml || ""}
+                                onChange={(event) => patchRow(row.id, { descriptionHtml: event.target.value })}
+                              />
+                            )}
+
+                            <div className="field-meta">
+                              <small className={`counter ${validation.description.ideal ? "good" : validation.description.valid ? "warning" : "critical"}`}>
+                                {validation.description.wordCount} words
+                                {validation.description.hasStructure ? " · Structured HTML" : " · Plain text"}
+                                {validation.description.hasKeyword ? " · Keyword present" : ""}
+                              </small>
+                              <small className="field-status">
+                                {validation.description.message || "Strong scannable on-page product copy."}
+                              </small>
+                            </div>
+                          </div>
                         </div>
+
+                        {aiNotesById[row.id] ? (
+                          <div className="status-banner banner-info" data-no-toast="true">
+                            <strong>Gemini SEO Note:</strong> {aiNotesById[row.id]}
+                          </div>
+                        ) : null}
 
                         {issues.length ? (
                           <div className="live-issues-area">
@@ -536,24 +986,74 @@ export default function ProductSeoRoute() {
                           </div>
                         ) : null}
 
+                        {/* ─── Gemini AI Diff & Impact Inspector ─── */}
+                        {auditResultsById[row.id] ? (
+                          <AiDiffInspector auditResult={auditResultsById[row.id]} />
+                        ) : null}
+
                         <div className="row-actions">
                           {AI_FEATURES_ENABLED ? (
-                            <button
-                              className="seo-button secondary"
-                              type="button"
-                              onClick={() => runAiFix(row)}
-                              disabled={aiFetcher.state !== "idle" && aiRowId === row.id}
-                            >
-                              {aiFetcher.state !== "idle" && aiRowId === row.id ? "AI Fixing..." : "AI Fix"}
-                            </button>
+                            <>
+                              <button
+                                className="seo-button secondary"
+                                type="button"
+                                onClick={() => runAiFix(row, "minor")}
+                                disabled={isAiBusy}
+                                title={`Gentle surgical refinement: fixes weak meta/keywords & light content polish without full rewrite (${CREDIT_COSTS.product_seo_minor} tokens)`}
+                              >
+                                {isAiBusy && aiActionLabel === "minor"
+                                  ? "Polishing..."
+                                  : `✨ AI Minor Polish (${CREDIT_COSTS.product_seo_minor} tok)`}
+                              </button>
+                              <button
+                                className="seo-button secondary"
+                                type="button"
+                                onClick={() => runAiFix(row, "full")}
+                                disabled={isAiBusy}
+                                title={`Optimizes title, keyword, metadata & writes rich structured description HTML (${CREDIT_COSTS.product_seo_fix} tokens)`}
+                              >
+                                {isAiBusy && aiActionLabel === "full"
+                                  ? "Generating..."
+                                  : `⚡ AI Full SEO + Content (${CREDIT_COSTS.product_seo_fix} tok)`}
+                              </button>
+                              <button
+                                className="seo-button secondary"
+                                type="button"
+                                onClick={() => runAiAudit(row)}
+                                disabled={isAiBusy}
+                                title={`Audits proposed changes, projected CTR and warns of SEO risks (${CREDIT_COSTS.audit_change} tokens)`}
+                              >
+                                {isAiBusy && aiActionLabel === "audit"
+                                  ? "Auditing..."
+                                  : `🤖 Gemini Diff Audit (${CREDIT_COSTS.audit_change} tok)`}
+                              </button>
+                            </>
                           ) : null}
                           <button className="seo-button" type="button" onClick={() => saveRow(row)} disabled={saveFetcher.state !== "idle" && savingRowId === row.id}>
-                            {saveFetcher.state !== "idle" && savingRowId === row.id ? "Saving..." : "Save Product SEO"}
+                            {saveFetcher.state !== "idle" && savingRowId === row.id
+                              ? "Saving..."
+                              : changedCount > 0
+                                ? `Save Changes (${changedCount})`
+                                : "Save Product SEO"}
                           </button>
                           <Link to="/app/seo-audit">Open SEO Audit</Link>
                         </div>
-                        {AI_FEATURES_ENABLED && aiFetcher.data?.ok && lastAiAppliedRowId === row.id ? (
-                          <small>{aiFetcher.data.result?.rationale || "AI suggestion applied to the form. Review and save when ready."}</small>
+                        {saveFetcher.data?.ok && saveFetcher.data.redirectCreated ? (
+                          <div style={{ background: "#ddf7ea", color: "var(--seo-good)", padding: "8px 12px", borderRadius: 6, fontSize: 13, marginTop: 8 }}>
+                            🛡️ 301 URL Redirect automatically created in Shopify to protect your Google rankings!
+                          </div>
+                        ) : null}
+                        {aiFetcher.data?.outOfCredits ? (
+                          <div className="error-box" data-no-toast="true" style={{ marginTop: 8 }}>
+                            {aiFetcher.data.error} <Link to="/app/billing">Upgrade to Pro</Link>
+                          </div>
+                        ) : null}
+                        {AI_FEATURES_ENABLED && aiFetcher.data?.creditsRemaining !== undefined && lastAiAppliedRowId === row.id ? (
+                          <small style={{ color: "var(--seo-primary)", display: "block", marginTop: 4 }}>
+                            {aiFetcher.data.superAccess || aiFetcher.data.creditsDeducted === 0
+                              ? "★ Super Access active (0 tokens deducted)."
+                              : `⚡ Deducted ${aiFetcher.data.creditsDeducted} token(s). Balance: ${aiFetcher.data.creditsRemaining} remaining.`}
+                          </small>
                         ) : null}
                       </div>
                     ) : null}

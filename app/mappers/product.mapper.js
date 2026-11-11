@@ -2,6 +2,7 @@ import {
   validateFocusKeyword,
   validateMetaDescription,
   validateMetaTitle,
+  validateProductDescription,
   validateProductTitle,
   validateUrlHandle,
 } from "../validators/seoValidators.js";
@@ -14,6 +15,9 @@ export function mapShopifyProductToSeoRow(product, productState = {}) {
   );
   const handle = String(product.handle || "");
   const focusKeyword = String(productState.focusKeyword || "");
+  const descriptionHtml = String(product.body_html || "");
+  const productType = String(product.product_type || "");
+  const tags = String(product.tags || "");
 
   return {
     id: String(product.id),
@@ -22,6 +26,9 @@ export function mapShopifyProductToSeoRow(product, productState = {}) {
     metaTitle,
     metaDescription,
     handle,
+    descriptionHtml,
+    productType,
+    tags,
     updatedAt: product.updated_at || null,
     validation: {
       title: validateProductTitle(title),
@@ -29,6 +36,7 @@ export function mapShopifyProductToSeoRow(product, productState = {}) {
       metaTitle: validateMetaTitle(metaTitle),
       metaDescription: validateMetaDescription(metaDescription),
       handle: validateUrlHandle(handle),
+      description: validateProductDescription(descriptionHtml, focusKeyword),
     },
   };
 }

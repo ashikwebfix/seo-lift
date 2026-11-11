@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useFetcher, useLoaderData } from "react-router";
 import seoStyles from "../styles/seo.css?url";
+import { WorkspaceSubnav, dispatchCreditsUpdate } from "../components/seo-ui";
+import { showToast } from "../components/toast-viewport";
 import {
   loadProductsPage,
   saveBulkMetaAndRescan,
@@ -17,18 +19,26 @@ export const loader = async ({ request }) => {
     return { configError, rows: [] };
   }
 
-  const result = await loadProductsPage({
-    shop,
-    storeDomain: shop,
-    token,
-    apiVersion,
-    limit: 50,
-  });
+  try {
+    const result = await loadProductsPage({
+      shop,
+      storeDomain: shop,
+      token,
+      apiVersion,
+      limit: 50,
+      includeDescription: false,
+    });
 
-  return {
-    configError: "",
-    rows: result.rows,
-  };
+    return {
+      configError: "",
+      rows: result.rows,
+    };
+  } catch (error) {
+    return {
+      configError: error?.message || "Unable to load Shopify products.",
+      rows: [],
+    };
+  }
 };
 
 export const action = async ({ request }) => {
@@ -87,6 +97,13 @@ export default function BulkMetaRoute() {
   const [aiRowId, setAiRowId] = useState("");
   const [lastAiAppliedRowId, setLastAiAppliedRowId] = useState("");
 
+  const originalById = useMemo(() => {
+    return (data.rows || []).reduce((acc, row) => {
+      acc[row.id] = row;
+      return acc;
+    }, {});
+  }, [data.rows]);
+
   const statusById = useMemo(() => fetcher.data?.statusById || {}, [fetcher.data]);
 
   function patchRow(id, patch) {
@@ -112,6 +129,7 @@ export default function BulkMetaRoute() {
           handle: row.handle,
           metaTitle: row.metaTitle,
           metaDescription: row.metaDescription,
+          previousValues: originalById[row.id] || null,
         }))),
       },
       { method: "post" },
@@ -119,6 +137,13 @@ export default function BulkMetaRoute() {
   }
 
   useEffect(() => {
+    if (aiFetcher.data?.ok && aiFetcher.data?.creditsRemaining !== undefined) {
+      dispatchCreditsUpdate({
+        availableCredits: aiFetcher.data.creditsRemaining,
+        plan: aiFetcher.data.plan,
+        superAccess: Boolean(aiFetcher.data.superAccess),
+      });
+    }
     if (aiFetcher.data?.ok && aiFetcher.data?.actionType === "meta_fix" && aiRowId) {
       patchRow(aiRowId, {
         metaTitle: aiFetcher.data.result?.metaTitle || "",
@@ -126,6 +151,11 @@ export default function BulkMetaRoute() {
       });
       setLastAiAppliedRowId(aiRowId);
       setAiRowId("");
+      showToast({
+        tone: "info",
+        title: "AI Meta Applied",
+        message: aiFetcher.data.result?.rationale || "Suggested meta title & description applied. Click Save meta to publish.",
+      });
     }
 
     if (aiFetcher.data?.error) {
@@ -139,6 +169,7 @@ export default function BulkMetaRoute() {
       {
         payload: JSON.stringify({
           actionType: "meta_fix",
+          productId: row.id,
           title: row.title,
           focusKeyword: row.focusKeyword,
           currentMetaTitle: row.metaTitle,
@@ -151,23 +182,33 @@ export default function BulkMetaRoute() {
 
   return (
     <>
-      <ui-title-bar title="Bulk Meta Editor" />
+      <ui-title-bar title="Products & Media — Bulk Meta" />
       <div className="seo-wrap seo-grid">
+        <WorkspaceSubnav group="products" />
         {data.configError ? <div className="error-box">{data.configError}</div> : null}
 
         <div className="toolbar">
           <button className="seo-button secondary" type="button" onClick={() => submitIntent("checkMeta")}>
             Check meta
           </button>
-          <button className="seo-button" type="button" onClick={() => submitIntent("saveMeta")}>
-            Save meta
+          <button className="seo-button" type="button" onClick={() => submitIntent("saveMeta")} disabled={fetcher.state !== "idle"}>
+            {fetcher.state !== "idle" ? "Saving..." : "Save meta"}
           </button>
-          <Link to="/app">Dashboard</Link>
         </div>
 
         {fetcher.data?.error ? <div className="error-box">{fetcher.data.error}</div> : null}
         {fetcher.data?.message ? <div className="error-box">{fetcher.data.message}</div> : null}
-        {aiFetcher.data?.error ? <div className="error-box">{aiFetcher.data.error}</div> : null}
+        {fetcher.data?.ok && fetcher.data?.saved ? (
+          <div className="status-banner banner-good" data-toast-title="Bulk Metadata Saved">
+            ✓ Saved metadata for {fetcher.data.saved} products and updated revision history.
+          </div>
+        ) : null}
+        {aiFetcher.data?.error ? (
+          <div className="error-box">
+            {aiFetcher.data.error}{" "}
+            {aiFetcher.data?.outOfCredits ? <Link to="/app/billing">Upgrade or manage credits</Link> : null}
+          </div>
+        ) : null}
 
         {!rows.length ? (
           <div className="empty-box">No rows available for bulk editing.</div>
@@ -210,12 +251,20 @@ export default function BulkMetaRoute() {
                           type="button"
                           onClick={() => runAiFix(row)}
                           disabled={aiFetcher.state !== "idle" && aiRowId === row.id}
+                          title="Generate click-worthy meta title & description (1 token)"
                         >
-                          {aiFetcher.state !== "idle" && aiRowId === row.id ? "AI Fixing..." : "AI Fix"}
+                          {aiFetcher.state !== "idle" && aiRowId === row.id ? "Generating..." : "⚡ AI Fix (1 tok)"}
                         </button>
                       ) : null}
                       {AI_FEATURES_ENABLED && aiFetcher.data?.ok && lastAiAppliedRowId === row.id ? (
-                        <small>{aiFetcher.data.result?.rationale || "AI suggestion applied. Review before saving."}</small>
+                        <small style={{ display: "block", marginTop: 4, color: "var(--seo-primary)" }}>
+                          {aiFetcher.data.result?.rationale || "AI suggestion applied."}
+                          {aiFetcher.data?.superAccess || aiFetcher.data?.creditsDeducted === 0
+                            ? " (Super Access · 0 tok)"
+                            : aiFetcher.data?.creditsRemaining !== undefined
+                              ? ` (Balance: ${aiFetcher.data.creditsRemaining} tok left)`
+                              : ""}
+                        </small>
                       ) : null}
                     </td>
                   </tr>
@@ -225,6 +274,6 @@ export default function BulkMetaRoute() {
           </div>
         )}
       </div>
-        </>
+    </>
   );
 }

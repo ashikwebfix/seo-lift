@@ -2,10 +2,32 @@ import {
   aiHandleSuggestion,
   aiRobotsImprovement,
 } from "../services/ai-fixes.server";
-import { generateMetaFix, generateProductSeoFix } from "../services/ai-provider.server.js";
-import { getAppState } from "../services/app-state.server.js";
+import {
+  auditProductSeoChange,
+  generateAiRobotsSuggestion,
+  generateMetaFix,
+  generatePageSpeedAiFixPlan,
+  generateProductContentFix,
+  generateProductSeoFix,
+  generateStoreCopilotBrief,
+  generateVisionImageAlt,
+  resolveKeywordCannibalization,
+} from "../services/ai-provider.server.js";
+import { getAppState, updateAppState } from "../services/app-state.server.js";
+import {
+  checkCreditBalance,
+  deductCredits,
+  getCreditUsageHistory,
+  getOrCreateCreditAccount,
+} from "../services/credit-manager.server.js";
 import { requireShopContext } from "../services/route-context.server";
+import {
+  checkStoreRouteAccess,
+  getEffectivePlatformAiSettings,
+} from "../services/store-control.server.js";
 import { AI_FEATURES_ENABLED } from "../utils/feature-flags";
+import { DEFAULT_GEMINI_MODEL } from "../utils/gemini-models.js";
+import { resolveActionCreditCost } from "../utils/credits.js";
 
 async function parseInput(request) {
   const type = request.headers.get("content-type") || "";
@@ -18,10 +40,47 @@ async function parseInput(request) {
   return rawPayload ? JSON.parse(String(rawPayload)) : Object.fromEntries(formData.entries());
 }
 
+export const loader = async ({ request }) => {
+  const { shop } = await requireShopContext(request);
+  if (!shop) {
+    return { ok: false, error: "Shop context required." };
+  }
+
+  const account = await getOrCreateCreditAccount(shop);
+  const usageHistory = await getCreditUsageHistory(shop, 15);
+
+  return {
+    ok: true,
+    account: {
+      plan: account.plan,
+      totalCredits: account.effectiveTotal,
+      usedCredits: account.usedCredits,
+      availableCredits: account.availableCredits,
+      percentUsed: account.percentUsed,
+      cycleResetAt: account.cycleResetAt,
+    },
+    usageHistory,
+  };
+};
+
 export const action = async ({ request }) => {
   const { shop } = await requireShopContext(request);
-  const appState = shop ? await getAppState(shop) : null;
-  const aiSettings = appState?.aiSettings;
+  if (!shop) {
+    return { ok: false, error: "Shop is required." };
+  }
+
+  const [appState, platformAi, access] = await Promise.all([
+    getAppState(shop),
+    getEffectivePlatformAiSettings(),
+    checkStoreRouteAccess(shop, "ai_features"),
+  ]);
+
+  const aiSettings = {
+    provider: platformAi.provider,
+    model: platformAi.model,
+    apiKey: platformAi.apiKey,
+    temperature: platformAi.temperature,
+  };
 
   try {
     const payload = await parseInput(request);
@@ -31,51 +90,221 @@ export const action = async ({ request }) => {
       return { ok: false, error: "actionType is required." };
     }
 
-    if (!AI_FEATURES_ENABLED && (actionType === "meta_fix" || actionType === "product_seo_fix")) {
-      return { ok: false, error: "AI Fix is temporarily hidden." };
+    if (!AI_FEATURES_ENABLED || !platformAi.isEnabled) {
+      return { ok: false, error: "Platform AI features are currently disabled by administrator." };
     }
 
+    if (!access.allowed) {
+      return { ok: false, error: access.reason };
+    }
+
+    // ─── Query-only actions (No credit cost) ─────────────────────────────────
+    if (actionType === "get_credit_balance") {
+      const account = await getOrCreateCreditAccount(shop);
+      return {
+        ok: true,
+        account: {
+          plan: account.plan,
+          totalCredits: account.effectiveTotal,
+          usedCredits: account.usedCredits,
+          availableCredits: account.availableCredits,
+          percentUsed: account.percentUsed,
+          cycleResetAt: account.cycleResetAt,
+        },
+      };
+    }
+
+    if (actionType === "get_usage_history") {
+      const history = await getCreditUsageHistory(shop, 25);
+      return { ok: true, history };
+    }
+
+    // Non-AI heuristics (Free of charge)
+    if (actionType === "url_handle_suggestion") {
+      const result = aiHandleSuggestion(payload);
+      return { ok: true, actionType, result };
+    }
+
+    if (actionType === "robots_txt_improvement" && !payload.useAi) {
+      const result = aiRobotsImprovement({ currentRules: payload.currentRules });
+      return { ok: true, actionType, result };
+    }
+
+    // ─── AI-powered actions with Credit Validation ───────────────────────────
+    const hasSuperAccess = Boolean(access.control?.superAccess);
+    const actionCost = resolveActionCreditCost(actionType, payload);
+    const creditCheck = await checkCreditBalance(
+      shop,
+      actionType,
+      actionCost,
+    );
+
+    if (!hasSuperAccess && !creditCheck.allowed) {
+      return {
+        ok: false,
+        outOfCredits: true,
+        error: `Insufficient AI tokens. This action requires ${creditCheck.cost} token${creditCheck.cost > 1 ? "s" : ""}, but you have ${creditCheck.availableCredits} remaining. Upgrade to Pro or buy a token package.`,
+        availableCredits: creditCheck.availableCredits,
+        cost: creditCheck.cost,
+        plan: creditCheck.plan,
+      };
+    }
+
+    let result = null;
+
     if (actionType === "meta_fix") {
-      const result = await generateMetaFix({
+      result = await generateMetaFix({
         settings: aiSettings,
         title: payload.title,
         focusKeyword: payload.focusKeyword,
         currentMetaTitle: payload.currentMetaTitle,
         currentMetaDescription: payload.currentMetaDescription,
       });
-      return { ok: true, actionType, result };
-    }
-
-    if (actionType === "product_seo_fix") {
-      const result = await generateProductSeoFix({
+    } else if (actionType === "product_seo_fix") {
+      result = await generateProductSeoFix({
         settings: aiSettings,
         title: payload.title,
         focusKeyword: payload.focusKeyword,
         handle: payload.handle,
         metaTitle: payload.metaTitle,
         metaDescription: payload.metaDescription,
+        descriptionHtml: payload.descriptionHtml || "",
+        productType: payload.productType || "",
+        tags: payload.tags || "",
+        mode: payload.mode || "full",
+        preserveHandle: Boolean(payload.preserveHandle),
       });
-      return { ok: true, actionType, result };
+    } else if (actionType === "product_content_fix") {
+      result = await generateProductContentFix({
+        settings: aiSettings,
+        title: payload.title,
+        focusKeyword: payload.focusKeyword,
+        descriptionHtml: payload.descriptionHtml || "",
+        productType: payload.productType || "",
+        tags: payload.tags || "",
+        goal: payload.goal || "polish",
+      });
+    } else if (actionType === "audit_change") {
+      result = await auditProductSeoChange({
+        settings: aiSettings,
+        productTitle: payload.title || payload.productTitle,
+        currentValues: payload.currentValues || {},
+        newValues: payload.newValues || {},
+      });
+    } else if (actionType === "vision_alt") {
+      result = await generateVisionImageAlt({
+        settings: aiSettings,
+        imageUrl: payload.imageUrl,
+        productTitle: payload.productTitle || payload.title,
+      });
+    } else if (actionType === "store_copilot") {
+      if (!appState?.lastScan) {
+        return {
+          ok: false,
+          error: "Run an SEO scan first so Gemini Copilot can analyze your store audit.",
+        };
+      }
+      result = await generateStoreCopilotBrief({
+        settings: aiSettings,
+        storeDomain: shop,
+        scan: appState.lastScan,
+        gscData: appState.gsc || null,
+      });
+      if (!result?.fallbackUsed) {
+        await updateAppState(shop, (current) => ({
+          ...current,
+          lastCopilotBrief: {
+            ...result,
+            generatedAt: new Date().toISOString(),
+            scoreAtGeneration: appState.lastScan?.summary?.score ?? null,
+          },
+        }));
+      }
+    } else if (actionType === "catalog_cannibalization") {
+      const groups = appState?.lastScan?.summary?.cannibalizedGroups || [];
+      result = await resolveKeywordCannibalization({
+        settings: aiSettings,
+        groups,
+      });
+    } else if (actionType === "robots_txt_improvement" && payload.useAi) {
+      result = await generateAiRobotsSuggestion({
+        settings: aiSettings,
+        currentRules: payload.currentRules,
+        storeDomain: shop,
+      });
+    } else if (actionType === "pagespeed_ai_fix") {
+      const mobileReport = payload.mobileReport || appState?.pageSpeed?.mobile || null;
+      const desktopReport = payload.desktopReport || appState?.pageSpeed?.desktop || null;
+      const targetReport = payload.report || mobileReport || desktopReport;
+      if (!targetReport) {
+        return {
+          ok: false,
+          error: "Run a live Google PageSpeed test first so Gemini can analyze your Core Web Vitals.",
+        };
+      }
+      result = await generatePageSpeedAiFixPlan({
+        settings: aiSettings,
+        storeDomain: shop,
+        report: targetReport,
+        mobileReport,
+        desktopReport,
+        matchedProductTitle: payload.matchedProductTitle || "",
+      });
+      if (!result?.fallbackUsed) {
+        await updateAppState(shop, (current) => ({
+          ...current,
+          pageSpeed: {
+            ...(current.pageSpeed || {}),
+            lastAiPlan: {
+              ...result,
+              generatedAt: new Date().toISOString(),
+            },
+          },
+        }));
+      }
+    } else {
+      return {
+        ok: false,
+        error: `Unsupported actionType: ${actionType}.`,
+      };
     }
 
-    if (actionType === "url_handle_suggestion") {
-      const result = aiHandleSuggestion(payload);
-      return { ok: true, actionType, result };
+    // Do not deduct credits if Gemini failed and graceful fallback was returned
+    if (result?.fallbackUsed) {
+      const currentAccount = await getOrCreateCreditAccount(shop);
+      return {
+        ok: true,
+        actionType,
+        result,
+        creditsDeducted: 0,
+        creditsRemaining: currentAccount.availableCredits,
+        plan: currentAccount.plan,
+      };
     }
 
-    if (actionType === "robots_txt_improvement") {
-      const result = aiRobotsImprovement({ currentRules: payload.currentRules });
-      return { ok: true, actionType, result };
-    }
+    const deduction = await deductCredits({
+      shop,
+      actionType,
+      customCost: actionCost,
+      productId: payload.productId || payload.id,
+      productTitle: payload.title || payload.productTitle || (actionType === "store_copilot" ? "Store-wide Copilot" : null),
+      modelUsed: aiSettings.model || DEFAULT_GEMINI_MODEL,
+      bypassLimit: hasSuperAccess,
+    });
 
     return {
-      ok: false,
-      error: "Unsupported actionType. Use meta_fix, product_seo_fix, url_handle_suggestion, or robots_txt_improvement.",
+      ok: true,
+      actionType,
+      result,
+      creditsDeducted: deduction.deducted,
+      creditsRemaining: deduction.remainingCredits,
+      plan: deduction.plan,
+      superAccess: hasSuperAccess,
     };
   } catch (error) {
     return {
       ok: false,
-      error: error?.message || "Unable to process AI fix request.",
+      error: error?.message || "Unable to process AI request.",
     };
   }
 };

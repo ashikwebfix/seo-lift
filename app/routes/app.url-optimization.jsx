@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
-import { Link, useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData } from "react-router";
 import seoStyles from "../styles/seo.css?url";
+import { WorkspaceSubnav } from "../components/seo-ui";
 import { requireShopContext } from "../services/route-context.server";
 import { applyUrlOptimizationsAndRescan, loadProductsPage } from "../services/seo-workflows.server";
 import { normalizeHandle } from "../validators/seoValidators";
@@ -14,21 +15,29 @@ export const loader = async ({ request }) => {
     return { configError, rows: [] };
   }
 
-  const result = await loadProductsPage({
-    shop,
-    storeDomain: shop,
-    token,
-    apiVersion,
-    limit: 50,
-  });
+  try {
+    const result = await loadProductsPage({
+      shop,
+      storeDomain: shop,
+      token,
+      apiVersion,
+      limit: 50,
+      includeDescription: false,
+    });
 
-  return {
-    configError: "",
-    rows: result.rows.map((row) => ({
-      ...row,
-      suggestedHandle: normalizeHandle(row.focusKeyword ? `${row.focusKeyword} ${row.title}` : row.title),
-    })),
-  };
+    return {
+      configError: "",
+      rows: result.rows.map((row) => ({
+        ...row,
+        suggestedHandle: normalizeHandle(row.focusKeyword ? `${row.focusKeyword} ${row.title}` : row.title),
+      })),
+    };
+  } catch (error) {
+    return {
+      configError: error?.message || "Unable to load Shopify products.",
+      rows: [],
+    };
+  }
 };
 
 export const action = async ({ request }) => {
@@ -111,19 +120,23 @@ export default function UrlOptimizationRoute() {
 
   return (
     <>
-      <ui-title-bar title="URL Optimization" />
+      <ui-title-bar title="Products & Media — URLs & 301s" />
       <div className="seo-wrap seo-grid">
+        <WorkspaceSubnav group="products" />
         {data.configError ? <div className="error-box">{data.configError}</div> : null}
 
         <div className="toolbar">
           <button className="seo-button" type="button" onClick={applySelected}>
             Bulk apply selected URLs
           </button>
-          <Link to="/app">Dashboard</Link>
         </div>
 
         {fetcher.data?.error ? <div className="error-box">{fetcher.data.error}</div> : null}
-        {fetcher.data?.ok ? <div className="section-card" style={{ borderLeft: "4px solid var(--seo-good)" }}>Updated {fetcher.data.updated} URLs successfully.</div> : null}
+        {fetcher.data?.ok ? (
+          <div className="status-banner banner-good" data-toast-title="URLs Updated">
+            Updated {fetcher.data.updated} URLs successfully.
+          </div>
+        ) : null}
 
         {!rows.length ? (
           <div className="empty-box">No products found.</div>

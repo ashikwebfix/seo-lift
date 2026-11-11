@@ -1,21 +1,37 @@
-import { mapShopifyProductToSeoRow } from "../mappers/product.mapper";
+import { mapShopifyProductToSeoRow } from "../mappers/product.mapper.js";
+import { AI_FEATURES_ENABLED } from "../utils/feature-flags.js";
+import { DEFAULT_GEMINI_MODEL } from "../utils/gemini-models.js";
 import {
   suggestImageAltText,
+  validateFocusKeyword,
   validateImageAlt,
   validateMetaDescription,
   validateMetaTitle,
   validateProductSeoInput,
+  validateProductTitle,
   validateUrlHandle,
-} from "../validators/seoValidators";
-import { getAppState, updateAppState } from "./app-state.server";
-import { runFullScan } from "./seo-engine.server";
-import { generateSitemapUrls } from "./sitemap.server";
+} from "../validators/seoValidators.js";
+import { generateProductSeoFix, generateVisionImageAlt } from "./ai-provider.server.js";
+import { getAppState, updateAppState } from "./app-state.server.js";
+import { checkCreditBalance, deductCredits } from "./credit-manager.server.js";
+import { applyIncrementalAuditPatch, runFullScan } from "./seo-engine.server.js";
+import { generateSitemapUrls } from "./sitemap.server.js";
 import {
+  createUrlRedirect,
+  fetchAllProducts,
+  fetchProductById,
   fetchProductImages,
   fetchProducts,
+  fetchProductsByIds,
+  getShopContext,
   updateProductImageAlt,
   updateProductSeo,
-} from "./shopify-admin.server";
+} from "./shopify-admin.server.js";
+import {
+  checkStoreRouteAccess,
+  getEffectivePlatformAiSettings,
+} from "./store-control.server.js";
+import prisma from "../db.server.js";
 
 const IMAGE_HISTORY_LIMIT = 20;
 
@@ -97,6 +113,7 @@ export async function loadProductsPage({
   limit = 20,
   pageInfo = "",
   query = "",
+  includeDescription = true,
 }) {
   const appState = await getAppState(shop);
 
@@ -107,6 +124,7 @@ export async function loadProductsPage({
     limit,
     pageInfo,
     query,
+    includeDescription,
   });
 
   const rows = products.map((product) => {
@@ -173,6 +191,113 @@ export async function loadImageOptimizerPage({
   };
 }
 
+async function recordProductRevision({
+  shop,
+  productId,
+  productTitle,
+  changeType,
+  beforeValues = {},
+  afterValues = {},
+  aiVerdict = null,
+  redirectCreated = false,
+}) {
+  if (!shop || !productId) return;
+  try {
+    await prisma.productRevision.create({
+      data: {
+        shop,
+        productId: String(productId),
+        productTitle: productTitle ? String(productTitle).slice(0, 200) : null,
+        changeType,
+        beforeJson: JSON.stringify(beforeValues),
+        afterJson: JSON.stringify(afterValues),
+        aiVerdictJson: aiVerdict ? JSON.stringify(aiVerdict) : null,
+        redirectCreated: Boolean(redirectCreated),
+      },
+    });
+  } catch (revError) {
+    console.warn("Could not save product revision history:", revError?.message);
+  }
+}
+
+async function applyValidatedProductSeoUpdate({
+  shop,
+  storeDomain,
+  token,
+  apiVersion,
+  productId,
+  payload,
+  normalized,
+  changeType,
+}) {
+  const prevDesc = payload?.previousValues?.descriptionHtml;
+  const hasDescPayload = typeof normalized.descriptionHtml === "string";
+  const descriptionChanged =
+    hasDescPayload && (typeof prevDesc !== "string" || normalized.descriptionHtml !== prevDesc);
+
+  const shopifyPayload = {
+    title: normalized.title,
+    handle: normalized.handle,
+    metaTitle: normalized.metaTitle,
+    metaDescription: normalized.metaDescription,
+    ...(descriptionChanged ? { descriptionHtml: normalized.descriptionHtml } : {}),
+  };
+
+  await updateProductSeo({
+    storeDomain,
+    token,
+    apiVersion,
+    productId,
+    payload: shopifyPayload,
+  });
+
+  // Automatically create 301 redirect if handle was modified to prevent 404 errors
+  let redirectCreated = false;
+  const originalHandle = String(payload.originalHandle || "").trim();
+  if (originalHandle && originalHandle !== normalized.handle) {
+    const redirect = await createUrlRedirect({
+      storeDomain,
+      token,
+      apiVersion,
+      path: `/products/${originalHandle}`,
+      target: `/products/${normalized.handle}`,
+    });
+    redirectCreated = Boolean(redirect);
+  }
+
+  const baseBefore = payload.previousValues || { handle: originalHandle };
+  const revisionBefore = descriptionChanged
+    ? baseBefore
+    : { ...baseBefore, descriptionHtml: undefined };
+  const revisionAfter = descriptionChanged
+    ? normalized
+    : { ...normalized, descriptionHtml: undefined };
+
+  await recordProductRevision({
+    shop,
+    productId,
+    productTitle: normalized.title,
+    changeType: changeType || payload.changeType || (redirectCreated ? "HANDLE_EDIT" : descriptionChanged ? "CONTENT_EDIT" : "METADATA_EDIT"),
+    beforeValues: revisionBefore,
+    afterValues: revisionAfter,
+    aiVerdict: payload.aiVerdict || null,
+    redirectCreated,
+  });
+
+  await updateAppState(shop, (current) => ({
+    ...current,
+    productSeo: {
+      ...current.productSeo,
+      [String(productId)]: {
+        ...(current.productSeo?.[String(productId)] || {}),
+        focusKeyword: normalized.focusKeyword,
+      },
+    },
+  }));
+
+  return { redirectCreated, descriptionUpdated: descriptionChanged };
+}
+
 export async function saveProductSeoAndRescan({
   shop,
   storeDomain,
@@ -190,30 +315,30 @@ export async function saveProductSeoAndRescan({
     };
   }
 
-  await updateProductSeo({
-    storeDomain,
-    token,
-    apiVersion,
-    productId,
-    payload: validation.normalized,
-  });
-
-  await updateAppState(shop, (current) => ({
-    ...current,
-    productSeo: {
-      ...current.productSeo,
-      [String(productId)]: {
-        ...(current.productSeo?.[String(productId)] || {}),
-        focusKeyword: validation.normalized.focusKeyword,
-      },
-    },
-  }));
-
-  await runFullScan({
+  const { redirectCreated, descriptionUpdated } = await applyValidatedProductSeoUpdate({
     shop,
     storeDomain,
     token,
     apiVersion,
+    productId,
+    payload,
+    normalized: validation.normalized,
+  });
+
+  await applyIncrementalAuditPatch({
+    shop,
+    storeDomain,
+    token,
+    apiVersion,
+    updatedProducts: [
+      {
+        id: String(productId),
+        title: validation.normalized.title,
+        handle: validation.normalized.handle,
+        metafields_global_title_tag: validation.normalized.metaTitle,
+        metafields_global_description_tag: validation.normalized.metaDescription,
+      },
+    ],
   });
 
   return {
@@ -221,6 +346,254 @@ export async function saveProductSeoAndRescan({
     productId: String(productId),
     normalized: validation.normalized,
     quality: validation.quality,
+    redirectCreated,
+    descriptionUpdated,
+  };
+}
+
+function buildAutoFixSeoPayload(product, suggestion) {
+  const titleValid = validateProductTitle(product.title).valid;
+  const handleCheck = validateUrlHandle(product.handle || "");
+  const keywordValid = validateFocusKeyword(product.focusKeyword || "").valid;
+
+  const candidate = {
+    title: titleValid ? String(product.title).trim() : suggestion.title,
+    focusKeyword: keywordValid ? String(product.focusKeyword).trim() : suggestion.focusKeyword,
+    handle: handleCheck.valid ? handleCheck.normalized : suggestion.handle,
+    metaTitle: suggestion.metaTitle,
+    metaDescription: suggestion.metaDescription,
+  };
+
+  const checked = validateProductSeoInput(candidate);
+  return checked.valid ? checked : validateProductSeoInput(suggestion);
+}
+
+/**
+ * Generates and applies Gemini AI SEO fixes for 1 to 5 products from an audit,
+ * creating 301 redirects when handles change, recording revisions, deducting credits,
+ * and refreshing the store audit once after all updates complete.
+ */
+export async function runAiAutoFixProducts({
+  shop,
+  storeDomain,
+  token,
+  apiVersion,
+  products = [],
+}) {
+  const uniqueProducts = [];
+  const seenIds = new Set();
+  for (const item of Array.isArray(products) ? products : []) {
+    const id = String(item?.id || item?.productId || "").trim();
+    if (!id || seenIds.has(id)) continue;
+    seenIds.add(id);
+    uniqueProducts.push({
+      id,
+      title: String(item?.title || item?.productTitle || ""),
+      handle: String(item?.handle || ""),
+      focusKeyword: String(item?.focusKeyword || ""),
+      metaTitle: String(item?.metaTitle || ""),
+      metaDescription: String(item?.metaDescription || ""),
+    });
+    if (uniqueProducts.length >= 5) break;
+  }
+
+  if (!uniqueProducts.length) {
+    return { ok: false, error: "No valid product items selected for AI auto-fix." };
+  }
+
+  const [platformAi, access, appState] = await Promise.all([
+    getEffectivePlatformAiSettings(),
+    checkStoreRouteAccess(shop, "ai_features"),
+    getAppState(shop),
+  ]);
+
+  if (!AI_FEATURES_ENABLED || !platformAi.isEnabled) {
+    return { ok: false, error: "Platform AI features are currently disabled by administrator." };
+  }
+  if (!platformAi.apiKey) {
+    return {
+      ok: false,
+      error: "Platform Gemini AI credentials are not configured yet. Ask your SuperAdmin to configure them in /superadmin/ai.",
+    };
+  }
+  if (!access.allowed) {
+    return { ok: false, error: access.reason };
+  }
+
+  const hasSuperAccess = Boolean(access.control?.superAccess);
+  const aiSettings = {
+    provider: platformAi.provider,
+    model: platformAi.model,
+    apiKey: platformAi.apiKey,
+    temperature: platformAi.temperature,
+  };
+
+  const initialBalance = await checkCreditBalance(shop, "product_seo_fix");
+  if (!hasSuperAccess && !initialBalance.allowed) {
+    return {
+      ok: false,
+      error: `Insufficient AI tokens. Auto-fix requires ${initialBalance.cost} tokens per product, but you have ${initialBalance.availableCredits} remaining.`,
+    };
+  }
+
+  // Backfill product metadata via targeted node lookup for only missing IDs
+  const missingIds = uniqueProducts
+    .filter((item) => !item.title || !item.handle)
+    .map((item) => item.id);
+  if (missingIds.length > 0) {
+    try {
+      const lookedUp = await fetchProductsByIds({
+        storeDomain,
+        token,
+        apiVersion,
+        productIds: missingIds,
+      });
+      const byId = new Map((lookedUp || []).map((row) => [String(row.id), row]));
+      for (const item of uniqueProducts) {
+        const live = byId.get(item.id);
+        if (!live) continue;
+        if (!item.title) item.title = String(live.title || "");
+        if (!item.handle) item.handle = String(live.handle || "");
+        if (!item.metaTitle) item.metaTitle = String(live.metafields_global_title_tag || "");
+        if (!item.metaDescription) item.metaDescription = String(live.metafields_global_description_tag || "");
+        if (!item.descriptionHtml) item.descriptionHtml = String(live.body_html || "");
+      }
+    } catch {
+      // Fall back to provided metadata if Shopify lookup fails
+    }
+  }
+
+  const fixedProducts = [];
+  const errors = [];
+  let creditsDeducted = 0;
+  let creditsRemaining = initialBalance.availableCredits;
+  let stoppedReason = "";
+
+  for (let index = 0; index < uniqueProducts.length; index += 1) {
+    const product = uniqueProducts[index];
+    const focusKeyword =
+      product.focusKeyword || String(appState?.productSeo?.[product.id]?.focusKeyword || "");
+
+    if (index > 0 && !hasSuperAccess) {
+      const stepBalance = await checkCreditBalance(shop, "product_seo_fix");
+      creditsRemaining = stepBalance.availableCredits;
+      if (!stepBalance.allowed) {
+        stoppedReason = `Stopped after ${fixedProducts.length} product(s): remaining AI credits (${stepBalance.availableCredits}) are below the ${stepBalance.cost}-credit cost per fix.`;
+        break;
+      }
+    }
+
+    try {
+      const suggestion = await generateProductSeoFix({
+        settings: aiSettings,
+        title: product.title,
+        focusKeyword,
+        handle: product.handle,
+        metaTitle: product.metaTitle,
+        metaDescription: product.metaDescription,
+        descriptionHtml: product.descriptionHtml || "",
+        productType: product.productType || "",
+        tags: product.tags || "",
+        preserveHandle: validateUrlHandle(product.handle || "").valid,
+      });
+
+      if (suggestion?.fallbackUsed) {
+        errors.push({ productId: product.id, error: "AI returned fallback output; skipped without charging credits." });
+        continue;
+      }
+
+      const validation = buildAutoFixSeoPayload({ ...product, focusKeyword }, suggestion);
+      if (!validation.valid) {
+        const firstErr = Object.values(validation.errors || {})[0] || "Generated fields failed validation.";
+        errors.push({ productId: product.id, error: firstErr });
+        continue;
+      }
+
+      const { redirectCreated } = await applyValidatedProductSeoUpdate({
+        shop,
+        storeDomain,
+        token,
+        apiVersion,
+        productId: product.id,
+        payload: {
+          originalHandle: product.handle,
+          previousValues: {
+            title: product.title,
+            handle: product.handle,
+            focusKeyword,
+            metaTitle: product.metaTitle,
+            metaDescription: product.metaDescription,
+          },
+          aiVerdict: {
+            verdictSummary: suggestion.rationale || "1-Click AI SEO Auto-Fix from SEO Audit.",
+            model: aiSettings.model || DEFAULT_GEMINI_MODEL,
+          },
+        },
+        normalized: validation.normalized,
+        changeType: "AI_AUTO_FIX",
+      });
+
+      const deduction = await deductCredits({
+        shop,
+        actionType: "product_seo_fix",
+        productId: product.id,
+        productTitle: validation.normalized.title,
+        modelUsed: aiSettings.model || DEFAULT_GEMINI_MODEL,
+        bypassLimit: hasSuperAccess,
+      });
+
+      creditsDeducted += deduction.deducted;
+      creditsRemaining = deduction.remainingCredits;
+      fixedProducts.push({
+        productId: product.id,
+        title: validation.normalized.title,
+        handle: validation.normalized.handle,
+        focusKeyword: validation.normalized.focusKeyword,
+        metaTitle: validation.normalized.metaTitle,
+        metaDescription: validation.normalized.metaDescription,
+        rationale: suggestion.rationale,
+        redirectCreated,
+      });
+    } catch (error) {
+      errors.push({ productId: product.id, error: error?.message || "Failed to auto-fix product." });
+    }
+  }
+
+  let scan = null;
+  if (fixedProducts.length > 0) {
+    scan = await applyIncrementalAuditPatch({
+      shop,
+      storeDomain,
+      token,
+      apiVersion,
+      updatedProducts: fixedProducts.map((p) => ({
+        id: String(p.productId),
+        title: p.title,
+        handle: p.handle,
+        metafields_global_title_tag: p.metaTitle,
+        metafields_global_description_tag: p.metaDescription,
+      })),
+    });
+  }
+
+  if (!fixedProducts.length) {
+    return {
+      ok: false,
+      error: errors[0]?.error || "Unable to apply AI SEO fixes.",
+      errors,
+    };
+  }
+
+  return {
+    ok: true,
+    fixedCount: fixedProducts.length,
+    fixedProducts,
+    errors,
+    creditsDeducted,
+    creditsRemaining,
+    superAccess: hasSuperAccess,
+    stoppedReason,
+    scan,
   };
 }
 
@@ -338,28 +711,62 @@ export async function saveBulkMetaAndRescan({
     };
   }
 
-  await Promise.all(
-    rows.map((row) =>
-      updateProductSeo({
-        storeDomain,
-        token,
-        apiVersion,
-        productId: row.id,
-        payload: {
-          title: row.title,
-          handle: validateUrlHandle(row.handle || row.title).normalized,
-          metaTitle: String(row.metaTitle || "").trim(),
-          metaDescription: String(row.metaDescription || "").trim(),
-        },
-      }),
-    ),
-  );
+  // Apply updates sequentially to stay safely within Shopify API rate limits and avoid SQLite write contention.
+  for (const row of rows) {
+    const normalizedHandle = validateUrlHandle(row.handle || row.title).normalized;
+    const nextMetaTitle = String(row.metaTitle || "").trim();
+    const nextMetaDescription = String(row.metaDescription || "").trim();
 
-  await runFullScan({
+    await updateProductSeo({
+      storeDomain,
+      token,
+      apiVersion,
+      productId: row.id,
+      payload: {
+        title: row.title,
+        handle: normalizedHandle,
+        metaTitle: nextMetaTitle,
+        metaDescription: nextMetaDescription,
+      },
+    });
+
+    const prev = row.previousValues || {};
+    const changed =
+      prev.metaTitle !== nextMetaTitle || prev.metaDescription !== nextMetaDescription;
+    if (changed) {
+      await recordProductRevision({
+        shop,
+        productId: row.id,
+        productTitle: row.title,
+        changeType: "BULK_META_EDIT",
+        beforeValues: {
+          title: prev.title ?? row.title,
+          handle: prev.handle ?? normalizedHandle,
+          metaTitle: prev.metaTitle ?? "",
+          metaDescription: prev.metaDescription ?? "",
+        },
+        afterValues: {
+          title: row.title,
+          handle: normalizedHandle,
+          metaTitle: nextMetaTitle,
+          metaDescription: nextMetaDescription,
+        },
+      });
+    }
+  }
+
+  await applyIncrementalAuditPatch({
     shop,
     storeDomain,
     token,
     apiVersion,
+    updatedProducts: rows.map((row) => ({
+      id: String(row.id),
+      title: row.title,
+      handle: validateUrlHandle(row.handle || row.title).normalized,
+      metafields_global_title_tag: String(row.metaTitle || "").trim(),
+      metafields_global_description_tag: String(row.metaDescription || "").trim(),
+    })),
   });
 
   return {
@@ -384,34 +791,119 @@ export async function applyUrlOptimizationsAndRescan({
     };
   });
 
-  await Promise.all(
-    normalizedRows.map((row) =>
-      updateProductSeo({
+  for (const row of normalizedRows) {
+    await updateProductSeo({
+      storeDomain,
+      token,
+      apiVersion,
+      productId: row.id,
+      payload: {
+        title: row.title,
+        handle: row.normalizedHandle,
+        metaTitle: row.metaTitle,
+        metaDescription: row.metaDescription,
+      },
+    });
+
+    let redirectCreated = false;
+    if (row.handle && row.handle !== row.normalizedHandle) {
+      const redirect = await createUrlRedirect({
         storeDomain,
         token,
         apiVersion,
+        path: `/products/${row.handle}`,
+        target: `/products/${row.normalizedHandle}`,
+      });
+      redirectCreated = Boolean(redirect);
+
+      await recordProductRevision({
+        shop,
         productId: row.id,
-        payload: {
+        productTitle: row.title,
+        changeType: "URL_OPTIMIZATION",
+        beforeValues: {
+          title: row.title,
+          handle: row.handle,
+          metaTitle: row.metaTitle,
+          metaDescription: row.metaDescription,
+        },
+        afterValues: {
           title: row.title,
           handle: row.normalizedHandle,
           metaTitle: row.metaTitle,
           metaDescription: row.metaDescription,
         },
-      }),
-    ),
-  );
+        redirectCreated,
+      });
+    }
+  }
 
-  await runFullScan({
+  await applyIncrementalAuditPatch({
     shop,
     storeDomain,
     token,
     apiVersion,
+    updatedProducts: normalizedRows.map((row) => ({
+      id: String(row.id),
+      title: row.title,
+      handle: row.normalizedHandle,
+      metafields_global_title_tag: row.metaTitle || "",
+      metafields_global_description_tag: row.metaDescription || "",
+    })),
   });
 
   return {
     ok: true,
     updated: normalizedRows.length,
   };
+}
+
+export async function rollbackProductRevision({
+  shop,
+  storeDomain,
+  token,
+  apiVersion,
+  revisionId,
+}) {
+  const revision = await prisma.productRevision.findFirst({
+    where: { id: String(revisionId || ""), shop },
+  });
+
+  if (!revision) {
+    throw new Error("Revision record not found.");
+  }
+
+  const before = JSON.parse(revision.beforeJson || "{}");
+  const after = JSON.parse(revision.afterJson || "{}");
+
+  const nextPayload = {
+    title: String(before.title || after.title || revision.productTitle || "").trim(),
+    handle: validateUrlHandle(before.handle || after.handle || before.title || "").normalized,
+    metaTitle: String(before.metaTitle ?? after.metaTitle ?? "").trim(),
+    metaDescription: String(before.metaDescription ?? after.metaDescription ?? "").trim(),
+    focusKeyword: String(before.focusKeyword ?? after.focusKeyword ?? "").trim(),
+    ...(typeof before.descriptionHtml === "string"
+      ? { descriptionHtml: before.descriptionHtml }
+      : {}),
+  };
+
+  if (!nextPayload.title) {
+    throw new Error("Cannot rollback: previous product title is unavailable in this revision.");
+  }
+
+  return saveProductSeoAndRescan({
+    shop,
+    storeDomain,
+    token,
+    apiVersion,
+    productId: revision.productId,
+    payload: {
+      ...nextPayload,
+      originalHandle: after.handle || "",
+      previousValues: after,
+      changeType: "ROLLBACK",
+    },
+  });
 }
 
 export async function applyImageAltFixesAndRescan({
@@ -475,25 +967,27 @@ export async function applyImageAltFixesAndRescan({
     };
   }
 
+  let updatedCount = 0;
   try {
-    await Promise.all(
-      normalizedRows.map((row) =>
-        updateProductImageAlt({
-          storeDomain,
-          token,
-          apiVersion,
-          productId: row.productId,
-          imageId: row.id,
-          altText: row.altText,
-        }),
-      ),
-    );
+    // REST image ALT updates share Shopify's 2 req/s REST bucket, so apply sequentially.
+    for (const row of normalizedRows) {
+      await updateProductImageAlt({
+        storeDomain,
+        token,
+        apiVersion,
+        productId: row.productId,
+        imageId: row.id,
+        altText: row.altText,
+      });
+      updatedCount += 1;
+    }
 
-    await runFullScan({
+    await applyIncrementalAuditPatch({
       shop,
       storeDomain,
       token,
       apiVersion,
+      updatedProducts: [],
     });
   } catch (error) {
     const historyState = await appendImageOptimizerHistory({
@@ -502,7 +996,7 @@ export async function applyImageAltFixesAndRescan({
       status: "failed",
       summary: preCheck.summary,
       attempted: normalizedRows.length,
-      updated: 0,
+      updated: updatedCount,
       note: error?.message || "Failed to update one or more image ALT values.",
     });
 
@@ -554,11 +1048,11 @@ export async function regenerateSitemap({
     manualUrls.push(cleanManual);
   }
 
-  const { products } = await fetchProducts({
+  const { products } = await fetchAllProducts({
     storeDomain,
     token,
     apiVersion,
-    limit: 250,
+    maxProducts: 10000,
   });
 
   const urls = generateSitemapUrls({
@@ -581,4 +1075,337 @@ export async function regenerateSitemap({
     urls: next.sitemapUrls,
     manualUrls: next.sitemapManualUrls,
   };
+}
+
+export async function updateAutopilotSettings({
+  shop,
+  enabled,
+  optimizeMeta = true,
+  optimizeAlt = true,
+  maxImagesPerProduct = 3,
+}) {
+  const cleanShop = String(shop || "").trim().toLowerCase();
+  const next = await updateAppState(cleanShop, (current) => ({
+    ...current,
+    autopilot: {
+      ...(current.autopilot || {}),
+      enabled: Boolean(enabled),
+      optimizeMeta: Boolean(optimizeMeta),
+      optimizeAlt: Boolean(optimizeAlt),
+      maxImagesPerProduct: Math.max(1, Math.min(10, Number(maxImagesPerProduct || 3) || 3)),
+      lastRuns: Array.isArray(current.autopilot?.lastRuns) ? current.autopilot.lastRuns : [],
+    },
+  }));
+  return next.autopilot;
+}
+
+async function appendAutopilotRunLog(shop, entry) {
+  await updateAppState(shop, (current) => {
+    const prevRuns = Array.isArray(current.autopilot?.lastRuns) ? current.autopilot.lastRuns : [];
+    const filtered = prevRuns.filter(
+      (item) => !(String(item.productId) === String(entry.productId) && item.status === "RUNNING"),
+    );
+    return {
+      ...current,
+      autopilot: {
+        ...(current.autopilot || {}),
+        lastRuns: [entry, ...filtered].slice(0, 25),
+      },
+    };
+  });
+}
+
+/**
+ * Background Autopilot pipeline triggered by Shopify `products/create` webhook.
+ * Automatically generates SEO meta tags, focus keywords, and Vision ALT text for
+ * newly created/imported products when the merchant enables Autopilot.
+ */
+export async function runAutopilotForCreatedProduct({ shop, productPayload }) {
+  const cleanShop = String(shop || "").trim().toLowerCase();
+  const productId = String(productPayload?.id || "").trim();
+  if (!cleanShop || !productId) {
+    return { skipped: true, reason: "missing_context" };
+  }
+
+  const appState = await getAppState(cleanShop);
+  const autopilot = appState?.autopilot || {};
+  if (!autopilot.enabled) {
+    return { skipped: true, reason: "autopilot_disabled" };
+  }
+
+  // Deduplicate Shopify webhook retries for the same product within 10 minutes
+  const recentDuplicate = (autopilot.lastRuns || []).find((run) => {
+    if (String(run.productId) !== productId) return false;
+    const ageMs = Date.now() - new Date(run.createdAt || 0).getTime();
+    return ageMs < 10 * 60 * 1000 && (run.status === "COMPLETED" || run.status === "RUNNING");
+  });
+  if (recentDuplicate) {
+    return { skipped: true, reason: "duplicate_webhook" };
+  }
+
+  const productTitleFallback = String(productPayload?.title || `Product #${productId}`);
+  const [offlineSession, platformAi, access] = await Promise.all([
+    prisma.session.findFirst({ where: { shop: cleanShop, isOnline: false }, orderBy: { id: "desc" } }),
+    getEffectivePlatformAiSettings(),
+    checkStoreRouteAccess(cleanShop, "ai_features"),
+  ]);
+
+  const ctx = getShopContext({
+    sessionShop: cleanShop,
+    sessionToken: offlineSession?.accessToken || "",
+  });
+
+  if (ctx.configError || !ctx.token) {
+    await appendAutopilotRunLog(cleanShop, {
+      productId,
+      productTitle: productTitleFallback,
+      status: "SKIPPED",
+      metaUpdated: false,
+      imagesUpdated: 0,
+      creditsDeducted: 0,
+      error: ctx.configError || "No offline Shopify access token available.",
+      createdAt: new Date().toISOString(),
+    });
+    return { skipped: true, reason: "missing_shopify_token" };
+  }
+
+  if (!AI_FEATURES_ENABLED || !platformAi?.isEnabled || !platformAi?.apiKey || !access.allowed) {
+    await appendAutopilotRunLog(cleanShop, {
+      productId,
+      productTitle: productTitleFallback,
+      status: "SKIPPED",
+      metaUpdated: false,
+      imagesUpdated: 0,
+      creditsDeducted: 0,
+      error: !access.allowed ? access.reason : "Platform Gemini AI is unavailable.",
+      createdAt: new Date().toISOString(),
+    });
+    return { skipped: true, reason: "ai_unavailable" };
+  }
+
+  await appendAutopilotRunLog(cleanShop, {
+    productId,
+    productTitle: productTitleFallback,
+    status: "RUNNING",
+    metaUpdated: false,
+    imagesUpdated: 0,
+    creditsDeducted: 0,
+    error: "",
+    createdAt: new Date().toISOString(),
+  });
+
+  const hasSuperAccess = Boolean(access.control?.superAccess);
+  const aiSettings = {
+    provider: platformAi.provider,
+    model: platformAi.model,
+    apiKey: platformAi.apiKey,
+    temperature: platformAi.temperature,
+  };
+
+  let metaUpdated = false;
+  let imagesUpdated = 0;
+  let creditsDeducted = 0;
+  let runError = "";
+  let liveTitle = productTitleFallback;
+
+  try {
+    const liveProduct =
+      (await fetchProductById({
+        storeDomain: ctx.storeDomain,
+        token: ctx.token,
+        apiVersion: ctx.apiVersion,
+        productId,
+      }).catch(() => null)) || {
+        id: productId,
+        title: productTitleFallback,
+        handle: String(productPayload?.handle || ""),
+        metafields_global_title_tag: "",
+        metafields_global_description_tag: "",
+        images: Array.isArray(productPayload?.images) ? productPayload.images : [],
+      };
+
+    liveTitle = liveProduct.title || productTitleFallback;
+    const currentFocusKw = String(appState?.productSeo?.[productId]?.focusKeyword || "");
+
+    // 1. Auto-optimize SEO metadata & focus keyword when incomplete
+    let optimizedProduct = null;
+    if (autopilot.optimizeMeta) {
+      const needsMeta =
+        !validateProductTitle(liveProduct.title).valid ||
+        !validateUrlHandle(liveProduct.handle).valid ||
+        !validateFocusKeyword(currentFocusKw).valid ||
+        !validateMetaTitle(liveProduct.metafields_global_title_tag).valid ||
+        !validateMetaTitle(liveProduct.metafields_global_title_tag).ideal ||
+        !validateMetaDescription(liveProduct.metafields_global_description_tag).valid ||
+        !validateMetaDescription(liveProduct.metafields_global_description_tag).ideal;
+
+      if (needsMeta) {
+        const metaBalance = await checkCreditBalance(cleanShop, "product_seo_fix");
+        if (hasSuperAccess || metaBalance.allowed) {
+          const suggestion = await generateProductSeoFix({
+            settings: aiSettings,
+            title: liveProduct.title,
+            focusKeyword: currentFocusKw,
+            handle: liveProduct.handle,
+            metaTitle: liveProduct.metafields_global_title_tag,
+            metaDescription: liveProduct.metafields_global_description_tag,
+            descriptionHtml: liveProduct.body_html || "",
+            productType: liveProduct.product_type || "",
+            tags: liveProduct.tags || "",
+            preserveHandle: validateUrlHandle(liveProduct.handle || "").valid,
+          });
+
+          if (!suggestion?.fallbackUsed) {
+            const validation = buildAutoFixSeoPayload(
+              { ...liveProduct, focusKeyword: currentFocusKw },
+              suggestion,
+            );
+            if (validation.valid) {
+              await applyValidatedProductSeoUpdate({
+                shop: cleanShop,
+                storeDomain: ctx.storeDomain,
+                token: ctx.token,
+                apiVersion: ctx.apiVersion,
+                productId,
+                payload: {
+                  originalHandle: liveProduct.handle,
+                  previousValues: {
+                    title: liveProduct.title,
+                    handle: liveProduct.handle,
+                    focusKeyword: currentFocusKw,
+                    metaTitle: liveProduct.metafields_global_title_tag,
+                    metaDescription: liveProduct.metafields_global_description_tag,
+                  },
+                  aiVerdict: {
+                    verdictSummary: suggestion.rationale || "Autopilot auto-optimized on product create.",
+                    model: aiSettings.model || DEFAULT_GEMINI_MODEL,
+                  },
+                },
+                normalized: validation.normalized,
+                changeType: "AUTOPILOT_CREATE",
+              });
+
+              const deduction = await deductCredits({
+                shop: cleanShop,
+                actionType: "product_seo_fix",
+                productId,
+                productTitle: validation.normalized.title,
+                modelUsed: aiSettings.model || DEFAULT_GEMINI_MODEL,
+                bypassLimit: hasSuperAccess,
+              });
+              creditsDeducted += deduction.deducted;
+              metaUpdated = true;
+              optimizedProduct = {
+                id: String(productId),
+                title: validation.normalized.title,
+                handle: validation.normalized.handle,
+                metafields_global_title_tag: validation.normalized.metaTitle,
+                metafields_global_description_tag: validation.normalized.metaDescription,
+              };
+            }
+          }
+        } else {
+          runError = "Insufficient AI tokens for product metadata.";
+        }
+      }
+    }
+
+    // 2. Auto-optimize missing/weak image ALT tags with Gemini Vision
+    if (autopilot.optimizeAlt && Array.isArray(liveProduct.images) && liveProduct.images.length) {
+      const targetImages = liveProduct.images
+        .filter((img) => {
+          const check = validateImageAlt(img.alt || "");
+          return !check.valid || check.generic || check.tooShort;
+        })
+        .slice(0, autopilot.maxImagesPerProduct || 3);
+
+      for (const img of targetImages) {
+        const imgId = String(img.id || "").trim();
+        const imgUrl = String(img.src || "").trim();
+        if (!imgId || !imgUrl) continue;
+
+        const imgBalance = await checkCreditBalance(cleanShop, "vision_alt");
+        if (!hasSuperAccess && !imgBalance.allowed) {
+          if (!runError) runError = "Insufficient AI tokens for remaining image ALT tags.";
+          break;
+        }
+
+        const vision = await generateVisionImageAlt({
+          settings: aiSettings,
+          imageUrl: imgUrl,
+          productTitle: liveTitle,
+        });
+
+        if (vision?.fallbackUsed || !vision?.altText) continue;
+
+        const altCheck = validateImageAlt(vision.altText);
+        if (!altCheck.valid) continue;
+
+        await updateProductImageAlt({
+          storeDomain: ctx.storeDomain,
+          token: ctx.token,
+          apiVersion: ctx.apiVersion,
+          productId,
+          imageId: imgId,
+          altText: altCheck.normalized,
+        });
+
+        const deduction = await deductCredits({
+          shop: cleanShop,
+          actionType: "vision_alt",
+          productId,
+          productTitle: `${liveTitle} (Image ${img.position || 1})`,
+          modelUsed: aiSettings.model || DEFAULT_GEMINI_MODEL,
+          bypassLimit: hasSuperAccess,
+        });
+        creditsDeducted += deduction.deducted;
+        imagesUpdated += 1;
+      }
+    }
+
+    if (metaUpdated || imagesUpdated > 0) {
+      await applyIncrementalAuditPatch({
+        shop: cleanShop,
+        storeDomain: ctx.storeDomain,
+        token: ctx.token,
+        apiVersion: ctx.apiVersion,
+        updatedProducts: optimizedProduct
+          ? [optimizedProduct]
+          : [
+              {
+                id: String(productId),
+                title: liveProduct.title,
+                handle: liveProduct.handle,
+                metafields_global_title_tag: liveProduct.metafields_global_title_tag,
+                metafields_global_description_tag: liveProduct.metafields_global_description_tag,
+              },
+            ],
+      }).catch(() => {});
+    }
+
+    await appendAutopilotRunLog(cleanShop, {
+      productId,
+      productTitle: liveTitle,
+      status: metaUpdated || imagesUpdated > 0 ? "COMPLETED" : "NO_CHANGES",
+      metaUpdated,
+      imagesUpdated,
+      creditsDeducted,
+      error: runError,
+      createdAt: new Date().toISOString(),
+    });
+
+    return { ok: true, productId, metaUpdated, imagesUpdated, creditsDeducted };
+  } catch (error) {
+    await appendAutopilotRunLog(cleanShop, {
+      productId,
+      productTitle: liveTitle,
+      status: "FAILED",
+      metaUpdated,
+      imagesUpdated,
+      creditsDeducted,
+      error: error?.message || "Autopilot failed.",
+      createdAt: new Date().toISOString(),
+    });
+    return { ok: false, error: error?.message };
+  }
 }

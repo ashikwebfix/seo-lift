@@ -143,9 +143,129 @@ export function validateUrlHandle(value) {
   };
 }
 
+export function stripHtmlTags(html = "") {
+  return String(html || "")
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<\/(p|div|li|h[1-6]|tr|blockquote|section|article)>/gi, " ")
+    .replace(/<br\s*\/?>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function sanitizeProductDescriptionHtml(html = "") {
+  return String(html || "")
+    .replace(/<(script|style|iframe|object|embed|form)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/\s(href|src)\s*=\s*(['"])\s*(?:javascript:|data:text\/html)[\s\S]*?\2/gi, ' $1="#"')
+    .trim();
+}
+
+function textMatchesKeyword(haystack, focusKeyword) {
+  const kw = String(focusKeyword || "").trim().toLowerCase();
+  if (kw.length < 3) return false;
+  const normalizedHaystack = String(haystack || "").toLowerCase();
+  if (normalizedHaystack.includes(kw)) return true;
+  const slugHaystack = normalizedHaystack.replace(/[^a-z0-9]+/g, " ");
+  const slugKw = kw.replace(/[^a-z0-9]+/g, " ").trim();
+  return Boolean(slugKw) && slugHaystack.includes(slugKw);
+}
+
+export function validateProductDescription(html = "", focusKeyword = "") {
+  const cleanHtml = sanitizeProductDescriptionHtml(html);
+  const plainText = stripHtmlTags(cleanHtml);
+  const charCount = plainText.length;
+  const wordCount = plainText ? plainText.split(/\s+/).filter(Boolean).length : 0;
+  const hasStructure = /<(h2|h3|ul|ol|li|p)\b/i.test(cleanHtml);
+  const cleanKw = String(focusKeyword || "").trim();
+  const hasKeyword = cleanKw.length >= 3 ? textMatchesKeyword(plainText, cleanKw) : false;
+  const valid = charCount <= 15000;
+  const ideal = valid && wordCount >= 80 && hasStructure && (cleanKw.length < 3 || hasKeyword);
+
+  let message = "";
+  if (!valid) {
+    message = "Product description plain text must be 15,000 characters or less.";
+  } else if (wordCount === 0) {
+    message = "Add product description copy (80+ words recommended for Google ranking).";
+  } else if (wordCount < 80) {
+    message = `Thin description (${wordCount} words). Aim for 80+ words with key buyer benefits.`;
+  } else if (!hasStructure) {
+    message = "Add HTML structure (headings or bullet points) to improve scan readability.";
+  } else if (cleanKw.length >= 3 && !hasKeyword) {
+    message = `Mention focus keyword "${cleanKw}" naturally inside the product description.`;
+  }
+
+  return {
+    valid,
+    ideal,
+    wordCount,
+    charCount,
+    hasStructure,
+    hasKeyword,
+    message,
+  };
+}
+
+export function evaluateOnPageSeoSignals({
+  title = "",
+  focusKeyword = "",
+  metaTitle = "",
+  metaDescription = "",
+  handle = "",
+  descriptionHtml = "",
+} = {}) {
+  const cleanKw = String(focusKeyword || "").trim();
+  const hasKeyword = validateFocusKeyword(cleanKw).valid;
+  const desc = validateProductDescription(descriptionHtml, cleanKw);
+
+  const keywordInTitle = hasKeyword && textMatchesKeyword(title, cleanKw);
+  const keywordInMetaTitle = hasKeyword && textMatchesKeyword(metaTitle, cleanKw);
+  const keywordInMetaDescription = hasKeyword && textMatchesKeyword(metaDescription, cleanKw);
+  const keywordInHandle = hasKeyword && textMatchesKeyword(handle, cleanKw);
+  const keywordInDescription = hasKeyword && desc.hasKeyword;
+
+  const checks = [
+    { key: "titleLength", label: "Product title (25-70 chars)", passed: validateProductTitle(title).valid },
+    { key: "focusKeyword", label: "Focus keyword set (3-40 chars)", passed: hasKeyword },
+    { key: "metaTitle", label: "Meta title ideal (45-60 chars)", passed: validateMetaTitle(metaTitle).valid && validateMetaTitle(metaTitle).ideal },
+    { key: "metaDescription", label: "Meta description ideal (120-155 chars)", passed: validateMetaDescription(metaDescription).valid && validateMetaDescription(metaDescription).ideal },
+    { key: "handle", label: "Clean SEO URL handle", passed: validateUrlHandle(handle).valid },
+    { key: "keywordInTitle", label: "Focus keyword in title", passed: keywordInTitle },
+    { key: "keywordInMetaTitle", label: "Focus keyword in meta title", passed: keywordInMetaTitle },
+    { key: "keywordInMetaDescription", label: "Focus keyword in meta description", passed: keywordInMetaDescription },
+    { key: "richDescription", label: "Rich product copy (80+ words + structure)", passed: desc.wordCount >= 80 && desc.hasStructure },
+    { key: "keywordInDescription", label: "Focus keyword in description", passed: keywordInDescription },
+  ];
+
+  const passedCount = checks.filter((c) => c.passed).length;
+  const totalCount = checks.length;
+  return {
+    checks,
+    passedCount,
+    totalCount,
+    scorePercent: Math.round((passedCount / totalCount) * 100),
+    keywordInTitle,
+    keywordInMetaTitle,
+    keywordInMetaDescription,
+    keywordInHandle,
+    keywordInDescription,
+    description: desc,
+  };
+}
+
 export function validateProductSeoInput(payload) {
   const cleanTitle = String(payload.title || "").trim();
   const cleanFocusKeyword = String(payload.focusKeyword || "").trim();
+  const hasDescriptionPayload = typeof payload.descriptionHtml === "string";
+  const cleanDescriptionHtml = hasDescriptionPayload
+    ? sanitizeProductDescriptionHtml(payload.descriptionHtml)
+    : undefined;
   const title = {
     valid: cleanTitle.length > 0,
     message: cleanTitle ? "" : "Product title is required.",
@@ -155,7 +275,11 @@ export function validateProductSeoInput(payload) {
     : { valid: true, message: "" };
   const metaTitle = validateMetaTitle(payload.metaTitle);
   const metaDescription = validateMetaDescription(payload.metaDescription);
-  const handle = validateUrlHandle(payload.handle);
+  const normalizedHandleCandidate = normalizeHandle(payload.handle);
+  const handle = validateUrlHandle(normalizedHandleCandidate);
+  const description = hasDescriptionPayload
+    ? validateProductDescription(cleanDescriptionHtml, cleanFocusKeyword)
+    : null;
 
   const errors = {
     title: title.message,
@@ -163,6 +287,9 @@ export function validateProductSeoInput(payload) {
     metaTitle: metaTitle.message,
     metaDescription: metaDescription.message,
     handle: handle.message,
+    ...(hasDescriptionPayload && description && !description.valid
+      ? { descriptionHtml: description.message }
+      : {}),
   };
 
   const hasErrors = Object.values(errors).some(Boolean);
@@ -176,10 +303,17 @@ export function validateProductSeoInput(payload) {
       metaTitle: String(payload.metaTitle || "").trim(),
       metaDescription: String(payload.metaDescription || "").trim(),
       handle: handle.normalized,
+      ...(hasDescriptionPayload ? { descriptionHtml: cleanDescriptionHtml } : {}),
     },
     quality: {
       metaTitleIdeal: metaTitle.ideal,
       metaDescriptionIdeal: metaDescription.ideal,
+      ...(description
+        ? {
+            descriptionIdeal: description.ideal,
+            descriptionWordCount: description.wordCount,
+          }
+        : {}),
     },
   };
 }

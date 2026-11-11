@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useFetcher, useLoaderData } from "react-router";
 import seoStyles from "../styles/seo.css?url";
+import { WorkspaceSubnav, dispatchCreditsUpdate } from "../components/seo-ui";
+import { showToast } from "../components/toast-viewport";
 import { requireShopContext } from "../services/route-context.server";
 import {
   applyImageAltFixesAndRescan,
@@ -8,6 +10,7 @@ import {
   runImageAltCheck,
 } from "../services/seo-workflows.server";
 import { suggestImageAltText, validateImageAlt } from "../validators/seoValidators";
+import { CREDIT_COSTS } from "../utils/credits.js";
 
 export const links = () => [{ rel: "stylesheet", href: seoStyles }];
 
@@ -62,27 +65,40 @@ export const loader = async ({ request }) => {
     });
   }
 
-  const result = await loadImageOptimizerPage({
-    shop,
-    storeDomain: shop,
-    token,
-    apiVersion,
-    limit: 25,
-    pageInfo,
-    query,
-    statusFilter,
-  });
+  try {
+    const result = await loadImageOptimizerPage({
+      shop,
+      storeDomain: shop,
+      token,
+      apiVersion,
+      limit: 25,
+      pageInfo,
+      query,
+      statusFilter,
+    });
 
-  return normalizePageData({
-    configError: "",
-    query,
-    statusFilter: result.statusFilter,
-    rows: result.rows,
-    pagination: result.pagination,
-    summary: result.summary,
-    history: result.history,
-    lastRun: result.lastRun,
-  });
+    return normalizePageData({
+      configError: "",
+      query,
+      statusFilter: result.statusFilter,
+      rows: result.rows,
+      pagination: result.pagination,
+      summary: result.summary,
+      history: result.history,
+      lastRun: result.lastRun,
+    });
+  } catch (error) {
+    return normalizePageData({
+      configError: error?.message || "Unable to load Shopify product images.",
+      query,
+      statusFilter,
+      rows: [],
+      pagination: { nextPageInfo: "", previousPageInfo: "" },
+      summary: defaultSummary(),
+      history: [],
+      lastRun: null,
+    });
+  }
 };
 
 export function shouldRevalidate({ formMethod, defaultShouldRevalidate }) {
@@ -192,6 +208,7 @@ export default function ImageOptimizerRoute() {
   const loaderData = useLoaderData();
   const actionFetcher = useFetcher();
   const listFetcher = useFetcher();
+  const aiFetcher = useFetcher();
   const selectAllRef = useRef(null);
 
   const [pageData, setPageData] = useState(() => normalizePageData(loaderData));
@@ -203,6 +220,8 @@ export default function ImageOptimizerRoute() {
   const [bulkPattern, setBulkPattern] = useState("{title} - product image view {position}");
   const [activeIntent, setActiveIntent] = useState("");
   const [pendingFixRows, setPendingFixRows] = useState([]);
+  const [aiImageId, setAiImageId] = useState("");
+  const [lastVisionImageId, setLastVisionImageId] = useState("");
 
   const syncPageData = useCallback((raw) => {
     const next = normalizePageData(raw);
@@ -309,6 +328,47 @@ export default function ImageOptimizerRoute() {
             }
           : row,
       ),
+    );
+  }
+
+  useEffect(() => {
+    if (aiFetcher.data?.ok && aiFetcher.data?.creditsRemaining !== undefined) {
+      dispatchCreditsUpdate({
+        availableCredits: aiFetcher.data.creditsRemaining,
+        plan: aiFetcher.data.plan,
+        superAccess: Boolean(aiFetcher.data.superAccess),
+      });
+    }
+    if (aiFetcher.data?.ok && aiFetcher.data?.actionType === "vision_alt" && aiImageId) {
+      const generatedAlt = aiFetcher.data.result?.altText;
+      if (generatedAlt) {
+        patchRow(aiImageId, { suggestedAlt: generatedAlt });
+      }
+      setLastVisionImageId(aiImageId);
+      setAiImageId("");
+      showToast({
+        tone: "info",
+        title: "Vision ALT Generated",
+        message: "AI suggested ALT text populated for review.",
+      });
+    }
+    if (aiFetcher.data?.error) {
+      setAiImageId("");
+    }
+  }, [aiFetcher.data, aiImageId]);
+
+  function generateVisionAlt(row) {
+    setAiImageId(row.id);
+    aiFetcher.submit(
+      {
+        payload: JSON.stringify({
+          actionType: "vision_alt",
+          imageUrl: row.imageUrl,
+          productTitle: row.productTitle,
+          productId: row.productId,
+        }),
+      },
+      { method: "post", action: "/app/api/ai" },
     );
   }
 
@@ -474,11 +534,18 @@ export default function ImageOptimizerRoute() {
 
   return (
     <>
-      <ui-title-bar title="Image Optimizer" />
+      <ui-title-bar title="Products & Media — Image Optimizer" />
       <div className="seo-wrap seo-grid">
+        <WorkspaceSubnav group="products" />
         {pageData.configError ? <div className="error-box">{pageData.configError}</div> : null}
         {localError ? <div className="error-box">{localError}</div> : null}
         {actionFetcher.data?.error ? <div className="error-box">{actionFetcher.data.error}</div> : null}
+        {aiFetcher.data?.error ? (
+          <div className="error-box">
+            {aiFetcher.data.error}{" "}
+            {aiFetcher.data?.outOfCredits ? <Link to="/app/billing">Upgrade or manage credits</Link> : null}
+          </div>
+        ) : null}
 
         <form method="get" className="toolbar" onSubmit={handleSearchSubmit}>
           <input
@@ -497,7 +564,6 @@ export default function ImageOptimizerRoute() {
           <button className="seo-button" type="submit" disabled={listFetcher.state !== "idle"}>
             {listFetcher.state !== "idle" ? "Loading..." : "Search"}
           </button>
-          <Link to="/app">Dashboard</Link>
         </form>
 
         <div className="seo-grid grid-3">
@@ -583,7 +649,7 @@ export default function ImageOptimizerRoute() {
         </div>
 
         {actionFetcher.data?.ok && actionFetcher.data?.intent === "checkAlt" ? (
-          <div className="section-card">
+          <div className="status-banner" data-toast="info" data-toast-title="Image ALT Audit">
             <strong>Check complete:</strong>{" "}
             {actionFetcher.data.summary?.needsFix || 0} need fixes, {actionFetcher.data.summary?.ideal || 0} are healthy,{" "}
             {actionFetcher.data.summary?.missing || 0} missing ALT.
@@ -591,7 +657,7 @@ export default function ImageOptimizerRoute() {
         ) : null}
 
         {actionFetcher.data?.ok && actionFetcher.data?.intent === "fixAlt" ? (
-          <div className="section-card">
+          <div className="status-banner banner-good" data-toast-title="Image ALT Updated">
             Updated ALT text for {actionFetcher.data.updated || 0} image{actionFetcher.data.updated === 1 ? "" : "s"}.
           </div>
         ) : null}
@@ -682,7 +748,30 @@ export default function ImageOptimizerRoute() {
                           value={row.suggestedAlt}
                           onChange={(event) => patchRow(row.id, { suggestedAlt: event.target.value })}
                         />
-                        <small>Used by Fix selected / Update all visible</small>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, flexWrap: "wrap", gap: 4 }}>
+                          <small>Used by Fix selected</small>
+                          <button
+                            type="button"
+                            className="seo-button secondary"
+                            style={{ fontSize: 11, padding: "3px 8px" }}
+                            onClick={() => generateVisionAlt(row)}
+                            disabled={aiFetcher.state !== "idle" && aiImageId === row.id}
+                            title={`Analyze this actual image with Gemini Vision (${CREDIT_COSTS.vision_alt} tokens)`}
+                          >
+                            {aiFetcher.state !== "idle" && aiImageId === row.id
+                              ? "Analyzing..."
+                              : `👁️ Gemini Vision (${CREDIT_COSTS.vision_alt} tok)`}
+                          </button>
+                        </div>
+                        {aiFetcher.data?.ok && lastVisionImageId === row.id ? (
+                          <small style={{ color: "var(--seo-primary)", display: "block", marginTop: 2 }}>
+                            {aiFetcher.data.superAccess
+                              ? "★ Super Access (0 tokens deducted)."
+                              : aiFetcher.data.creditsDeducted
+                                ? `⚡ Deducted ${aiFetcher.data.creditsDeducted} tokens. ${aiFetcher.data.creditsRemaining} remaining.`
+                                : "Fallback ALT applied (0 tokens charged)."}
+                          </small>
+                        ) : null}
                       </td>
                       <td>
                         <span className={`issue-chip ${tone}`}>{statusLabel(status)}</span>

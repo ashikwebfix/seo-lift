@@ -1,20 +1,26 @@
 /* global globalThis */
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, Outlet, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import seoStyles from "../styles/seo.css?url";
 import toastStyles from "../styles/toast.css?url";
+import { AiChatDrawer } from "../components/ai-chatbox";
 import { AppMenuShell } from "../components/seo-ui";
 import { SeoToastViewport, showToast } from "../components/toast-viewport";
+import { buildAiChatStoreContext } from "../services/ai-chat-executor.server";
+import { getAppState } from "../services/app-state.server";
 import { requireShopContext } from "../services/route-context.server";
 import { getCachedActiveAppSubscriptions } from "../services/billing.server";
 import { getOrCreateCreditAccount, syncPlanSubscription } from "../services/credit-manager.server";
 import {
+  getEffectivePlatformAiSettings,
   getOrCreateStoreControl,
   isFeatureAllowed,
   PLATFORM_FEATURES,
 } from "../services/store-control.server";
+import { PLAN_ALLOWANCES } from "../utils/credits";
+import { AI_FEATURES_ENABLED } from "../utils/feature-flags";
 
 export const links = () => [
   { rel: "stylesheet", href: seoStyles },
@@ -25,6 +31,12 @@ export const loader = async ({ request }) => {
   const url = new URL(request.url);
   let creditAccount = null;
   let storeControl = null;
+  let aiChatSeed = {
+    aiChatHistory: [],
+    storeSnapshot: null,
+    aiReady: false,
+    aiUnavailableReason: "",
+  };
 
   try {
     const { admin, shop, token, apiVersion } = await requireShopContext(request);
@@ -52,6 +64,27 @@ export const loader = async ({ request }) => {
         await syncPlanSubscription(shop, true);
         creditAccount = await getOrCreateCreditAccount(shop, "PRO");
       }
+
+      const [appState, platformAi] = await Promise.all([
+        getAppState(shop),
+        getEffectivePlatformAiSettings(),
+      ]);
+      const aiAllowedForStore = isFeatureAllowed(storeControl, "ai_features");
+      const aiReady = Boolean(AI_FEATURES_ENABLED && platformAi?.isEnabled && aiAllowedForStore);
+      const aiUnavailableReason = !AI_FEATURES_ENABLED
+        ? "AI features are disabled in app settings."
+        : !platformAi?.isEnabled
+          ? "Platform Gemini AI is disabled in SuperAdmin."
+          : !aiAllowedForStore
+            ? "AI Mode is restricted for this store."
+            : "";
+
+      aiChatSeed = {
+        aiChatHistory: Array.isArray(appState?.aiChatHistory) ? appState.aiChatHistory : [],
+        storeSnapshot: buildAiChatStoreContext({ shop, appState }),
+        aiReady,
+        aiUnavailableReason,
+      };
     }
   } catch (error) {
     if (error instanceof Response) throw error;
@@ -85,11 +118,14 @@ export const loader = async ({ request }) => {
       : null,
     routeBlocked,
     blockedFeatureLabel: matchedFeature?.label || "",
+    aiChatSeed,
   };
 };
 
 export default function App() {
-  const { apiKey, creditAccount, storeControl, routeBlocked, blockedFeatureLabel } = useLoaderData();
+  const { apiKey, creditAccount, storeControl, routeBlocked, blockedFeatureLabel, aiChatSeed } =
+    useLoaderData();
+  const [aiDrawerOpen, setAiDrawerOpen] = useState(false);
 
   const isSuspended = storeControl?.accessLevel === "SUSPENDED";
   const allowedSet = new Set(storeControl?.allowedFeatures || []);
@@ -114,6 +150,7 @@ export default function App() {
     <AppProvider embedded apiKey={apiKey}>
       <s-app-nav>
         {!isSuspended ? <s-link href="/app">Home</s-link> : null}
+        {canSee("ai_features") ? <s-link href="/app/ai-mode">Full AI Mode</s-link> : null}
         {canSee("seo_audit") ? <s-link href="/app/seo-audit">AI Audit</s-link> : null}
         {canSee("products") ? <s-link href="/app/products">Product SEO</s-link> : null}
         {canSee("bulk_meta") ? <s-link href="/app/bulk-meta">Bulk Meta</s-link> : null}
@@ -157,8 +194,30 @@ export default function App() {
         </div>
       ) : (
         <>
-          <AppMenuShell creditAccount={creditAccount} storeControl={storeControl} />
+          <AppMenuShell
+            creditAccount={creditAccount}
+            storeControl={storeControl}
+            canOpenAiMode={canSee("ai_features")}
+            aiModeOpen={aiDrawerOpen}
+            onOpenAiMode={() => setAiDrawerOpen(true)}
+          />
           <Outlet />
+          {canSee("ai_features") ? (
+            <AiChatDrawer
+              open={aiDrawerOpen}
+              onClose={() => setAiDrawerOpen(false)}
+              initialHistory={aiChatSeed?.aiChatHistory || []}
+              initialSnapshot={aiChatSeed?.storeSnapshot || null}
+              aiReady={Boolean(aiChatSeed?.aiReady)}
+              aiUnavailableReason={aiChatSeed?.aiUnavailableReason || ""}
+              creditAccount={{
+                availableCredits: creditAccount?.availableCredits ?? 0,
+                totalCredits: creditAccount?.effectiveTotal ?? PLAN_ALLOWANCES.FREE,
+                plan: creditAccount?.plan || "FREE",
+                superAccess: Boolean(storeControl?.superAccess),
+              }}
+            />
+          ) : null}
         </>
       )}
       <SeoToastViewport />

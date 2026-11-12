@@ -9,6 +9,7 @@ import {
   validateBulkMetaRows,
 } from "../services/seo-workflows.server";
 import { requireShopContext } from "../services/route-context.server";
+import { CREDIT_COSTS } from "../utils/credits";
 import { AI_FEATURES_ENABLED } from "../utils/feature-flags";
 
 export const links = () => [{ rel: "stylesheet", href: seoStyles }];
@@ -251,9 +252,11 @@ export default function BulkMetaRoute() {
                           type="button"
                           onClick={() => runAiFix(row)}
                           disabled={aiFetcher.state !== "idle" && aiRowId === row.id}
-                          title="Generate click-worthy meta title & description (1 token)"
+                          title={`Generate click-worthy meta title & description (${CREDIT_COSTS.meta_fix} tokens)`}
                         >
-                          {aiFetcher.state !== "idle" && aiRowId === row.id ? "Generating..." : "⚡ AI Fix (1 tok)"}
+                          {aiFetcher.state !== "idle" && aiRowId === row.id
+                            ? "Generating..."
+                            : `⚡ AI Fix (${CREDIT_COSTS.meta_fix} tok)`}
                         </button>
                       ) : null}
                       {AI_FEATURES_ENABLED && aiFetcher.data?.ok && lastAiAppliedRowId === row.id ? (

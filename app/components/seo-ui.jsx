@@ -10,11 +10,12 @@ export function dispatchCreditsUpdate(detail) {
 const WORKSPACE_GROUPS = Object.freeze({
   products: {
     title: "Products & Media",
-    subtitle: "Edit product listings, bulk meta tags, URL handles with 301 safety, and image ALT tags.",
+    subtitle: "Edit product listings, bulk meta tags, URL handles with 301 safety, image compression, and ALT tags.",
     tabs: [
       { key: "products", label: "Product SEO", to: "/app/products" },
       { key: "bulk_meta", label: "Bulk Meta", to: "/app/bulk-meta" },
       { key: "url_optimization", label: "URLs & 301s", to: "/app/url-optimization" },
+      { key: "image_optimizer", label: "Image Compression", to: "/app/image-optimizer?tab=compression" },
       { key: "image_optimizer", label: "Image ALT & Vision", to: "/app/image-optimizer" },
     ],
   },
@@ -38,6 +39,7 @@ export const APP_MENU_GROUPS = Object.freeze([
     submenus: [
       { label: "SEO Checklist", to: "/app" },
       { label: "Analytics & Trends", to: "/app#analytics" },
+      { label: "Full AI Mode", to: "/app/ai-mode", featureKey: "ai_features" },
     ],
   },
   {
@@ -60,6 +62,7 @@ export const APP_MENU_GROUPS = Object.freeze([
       { label: "Product SEO", to: "/app/products", featureKey: "products" },
       { label: "Bulk Meta", to: "/app/bulk-meta", featureKey: "bulk_meta" },
       { label: "URLs & 301s", to: "/app/url-optimization", featureKey: "url_optimization" },
+      { label: "Image Compression", to: "/app/image-optimizer?tab=compression", featureKey: "image_optimizer" },
       { label: "Image ALT & Vision", to: "/app/image-optimizer", featureKey: "image_optimizer" },
     ],
   },
@@ -118,10 +121,20 @@ function isSubmenuTargetActive(targetTo, pathname, search, hash) {
     const mode = new URLSearchParams(search || "").get("mode");
     return !mode;
   }
+  if (targetPath === "/app/image-optimizer") {
+    const tab = new URLSearchParams(search || "").get("tab");
+    return tab !== "compression";
+  }
   return true;
 }
 
-export function AppMenuShell({ creditAccount = null, storeControl = null }) {
+export function AppMenuShell({
+  creditAccount = null,
+  storeControl = null,
+  canOpenAiMode = false,
+  onOpenAiMode = null,
+  aiModeOpen = false,
+}) {
   const { pathname, search, hash } = useLocation();
   const [clientHash, setClientHash] = useState("");
   const isSuspended = storeControl?.accessLevel === "SUSPENDED";
@@ -202,14 +215,29 @@ export function AppMenuShell({ creditAccount = null, storeControl = null }) {
             })}
           </nav>
 
-          {creditAccount || hasSuperAccess ? (
-            <CreditPill
-              available={creditAccount?.availableCredits ?? 0}
-              total={creditAccount?.effectiveTotal ?? PLAN_ALLOWANCES.FREE}
-              plan={creditAccount?.plan || "FREE"}
-              superAccess={hasSuperAccess}
-            />
-          ) : null}
+          <div className="seo-nav-actions">
+            {canOpenAiMode && typeof onOpenAiMode === "function" ? (
+              <button
+                type="button"
+                className="ai-mode-launch-btn"
+                onClick={onOpenAiMode}
+                aria-expanded={aiModeOpen}
+                aria-haspopup="dialog"
+              >
+                <span aria-hidden="true">✨</span>
+                <span>AI Mode</span>
+              </button>
+            ) : null}
+
+            {creditAccount || hasSuperAccess ? (
+              <CreditPill
+                available={creditAccount?.availableCredits ?? 0}
+                total={creditAccount?.effectiveTotal ?? PLAN_ALLOWANCES.FREE}
+                plan={creditAccount?.plan || "FREE"}
+                superAccess={hasSuperAccess}
+              />
+            ) : null}
+          </div>
         </div>
 
         {activeGroup?.submenus?.length ? (
@@ -235,7 +263,7 @@ export function AppMenuShell({ creditAccount = null, storeControl = null }) {
 }
 
 export function WorkspaceSubnav({ group }) {
-  const { pathname } = useLocation();
+  const { pathname, search, hash } = useLocation();
   const matches = useMatches();
   const config = WORKSPACE_GROUPS[group];
   if (!config) return null;
@@ -248,7 +276,9 @@ export function WorkspaceSubnav({ group }) {
     if (!storeControl || storeControl.accessLevel === "FULL") return true;
     return allowedSet.has(tab.key);
   });
-  const activeTab = visibleTabs.find((tab) => pathname === tab.to);
+  const activeTab =
+    visibleTabs.find((tab) => isSubmenuTargetActive(tab.to, pathname, search, hash)) ||
+    visibleTabs.find((tab) => pathname === String(tab.to).split("?")[0]);
 
   return (
     <section className="workspace-header-card">

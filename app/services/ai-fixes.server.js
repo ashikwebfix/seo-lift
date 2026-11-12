@@ -1,4 +1,4 @@
-import { normalizeHandle } from "../validators/seoValidators";
+import { normalizeHandle } from "../validators/seoValidators.js";
 
 function trim(text, max = 160) {
   const clean = String(text || "").replace(/\s+/g, " ").trim();

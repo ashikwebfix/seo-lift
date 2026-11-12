@@ -680,6 +680,7 @@ export async function fetchProductImages({
       imageUrl: String(image.src || ""),
       width: Number(image.width || 0),
       height: Number(image.height || 0),
+      variantIds: Array.isArray(image.variant_ids) ? image.variant_ids.map(String) : [],
     }));
   });
 
@@ -887,4 +888,583 @@ export async function createUrlRedirect({
     console.warn(`Failed to create 301 redirect for ${cleanPath}:`, error?.message);
     return null;
   }
+}
+
+function toMediaImageGid(mediaId) {
+  const clean = String(mediaId || "").trim();
+  if (!clean) return "";
+  return clean.startsWith("gid://") ? clean : `gid://shopify/MediaImage/${clean}`;
+}
+
+function toVariantGid(variantId) {
+  const clean = String(variantId || "").trim();
+  if (!clean) return "";
+  return clean.startsWith("gid://") ? clean : `gid://shopify/ProductVariant/${clean}`;
+}
+
+async function fetchProductMediaSnapshot({
+  storeDomain,
+  token,
+  apiVersion,
+  productId,
+}) {
+  const data = await shopifyGraphqlRequest({
+    storeDomain,
+    token,
+    apiVersion,
+    query: `
+      query ProductMediaSnapshot($id: ID!) {
+        product(id: $id) {
+          id
+          media(first: 100) {
+            nodes {
+              id
+              alt
+              mediaContentType
+              status
+              ... on MediaImage {
+                image {
+                  id
+                  url
+                  width
+                  height
+                }
+              }
+            }
+          }
+          variants(first: 100) {
+            nodes {
+              id
+              media(first: 5) {
+                nodes {
+                  id
+                }
+              }
+              image {
+                id
+              }
+            }
+          }
+        }
+      }
+    `,
+    variables: { id: toProductGid(productId) },
+  });
+
+  const product = data?.product;
+  if (!product?.id) {
+    throw new Error(`Shopify product ${productId} was not found.`);
+  }
+
+  return {
+    productGid: product.id,
+    mediaNodes: Array.isArray(product.media?.nodes) ? product.media.nodes : [],
+    variantNodes: Array.isArray(product.variants?.nodes) ? product.variants.nodes : [],
+  };
+}
+
+async function uploadBufferToStagedTarget({
+  stagedTarget,
+  buffer,
+  filename,
+  mimeType,
+}) {
+  const targetUrl = String(stagedTarget?.url || "").trim();
+  if (!targetUrl) {
+    throw new Error("Shopify did not return a staged upload URL.");
+  }
+
+  const parameters = Array.isArray(stagedTarget.parameters) ? stagedTarget.parameters : [];
+  const looksLikeMultipartPost =
+    parameters.length > 0 &&
+    !targetUrl.includes("X-Goog-Signature") &&
+    !targetUrl.includes("X-Amz-Signature");
+
+  if (looksLikeMultipartPost) {
+    const formData = new FormData();
+    for (const param of parameters) {
+      if (param?.name) {
+        formData.append(param.name, String(param.value ?? ""));
+      }
+    }
+    formData.append("file", new Blob([buffer], { type: mimeType }), filename);
+
+    const uploadRes = await fetch(targetUrl, {
+      method: "POST",
+      body: formData,
+    });
+    if (!uploadRes.ok) {
+      const errText = await uploadRes.text().catch(() => "");
+      throw new Error(
+        `Staged multipart upload failed (${uploadRes.status}): ${errText.slice(0, 180) || "Upload rejected"}`,
+      );
+    }
+    return;
+  }
+
+  const headers = {
+    "Content-Type": mimeType,
+  };
+  for (const param of parameters) {
+    if (param?.name && !/^host$/i.test(param.name)) {
+      headers[param.name] = String(param.value ?? "");
+    }
+  }
+
+  const uploadRes = await fetch(targetUrl, {
+    method: "PUT",
+    headers,
+    body: buffer,
+  });
+  if (!uploadRes.ok) {
+    const errText = await uploadRes.text().catch(() => "");
+    throw new Error(
+      `Staged PUT upload failed (${uploadRes.status}): ${errText.slice(0, 180) || "Upload rejected"}`,
+    );
+  }
+}
+
+async function pollMediaReady({
+  storeDomain,
+  token,
+  apiVersion,
+  mediaGid,
+  maxAttempts = 18,
+  delayMs = 700,
+}) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const data = await shopifyGraphqlRequest({
+      storeDomain,
+      token,
+      apiVersion,
+      query: `
+        query PollMediaImage($id: ID!) {
+          node(id: $id) {
+            id
+            ... on MediaImage {
+              status
+              alt
+              image {
+                id
+                url
+                width
+                height
+              }
+              mediaErrors {
+                code
+                message
+              }
+            }
+          }
+        }
+      `,
+      variables: { id: mediaGid },
+    });
+
+    const node = data?.node;
+    if (!node) {
+      throw new Error("Uploaded Shopify media record disappeared during processing.");
+    }
+
+    if (node.status === "READY") {
+      return node;
+    }
+
+    if (node.status === "FAILED") {
+      const reason = (node.mediaErrors || []).map((e) => e.message).filter(Boolean).join(", ");
+      throw new Error(`Shopify failed processing compressed image: ${reason || "Media processing error"}`);
+    }
+
+    if (attempt < maxAttempts - 1) {
+      await sleep(delayMs);
+    }
+  }
+
+  throw new Error("Timed out waiting for Shopify CDN to finish processing compressed image.");
+}
+
+async function deleteProductMediaNodes({
+  storeDomain,
+  token,
+  apiVersion,
+  productGid,
+  mediaIds,
+}) {
+  const validIds = (Array.isArray(mediaIds) ? mediaIds : []).filter(Boolean);
+  if (!validIds.length) return;
+
+  const data = await shopifyGraphqlRequest({
+    storeDomain,
+    token,
+    apiVersion,
+    query: `
+      mutation DeleteProductMedia($productId: ID!, $mediaIds: [ID!]!) {
+        productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
+          deletedMediaIds
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    variables: {
+      productId: productGid,
+      mediaIds: validIds,
+    },
+  });
+
+  const userErrors = data?.productDeleteMedia?.userErrors || [];
+  if (userErrors.length) {
+    throw new Error(userErrors.map((e) => e.message).join(", "));
+  }
+}
+
+async function replaceProductImageViaRestFallback({
+  storeDomain,
+  token,
+  apiVersion,
+  productId,
+  oldImageId,
+  buffer,
+  filename,
+  altText,
+  position,
+  variantIds,
+}) {
+  const numericVariants = (Array.isArray(variantIds) ? variantIds : [])
+    .map((id) => Number(fromProductGid(id)))
+    .filter((id) => Number.isFinite(id) && id > 0);
+
+  const payload = {
+    image: {
+      attachment: buffer.toString("base64"),
+      filename,
+      alt: altText,
+      position,
+      ...(numericVariants.length ? { variant_ids: numericVariants } : {}),
+    },
+  };
+
+  const { data: created } = await shopifyRestRequest({
+    storeDomain,
+    token,
+    apiVersion,
+    path: `/products/${String(productId)}/images.json`,
+    method: "POST",
+    body: payload,
+  });
+
+  const newImg = created?.image;
+  if (!newImg?.id) {
+    throw new Error("Shopify REST image replacement did not return the new uploaded image.");
+  }
+
+  if (oldImageId && String(oldImageId) !== String(newImg.id)) {
+    await shopifyRestRequest({
+      storeDomain,
+      token,
+      apiVersion,
+      path: `/products/${String(productId)}/images/${String(oldImageId)}.json`,
+      method: "DELETE",
+    });
+  }
+
+  return {
+    productId: String(productId),
+    oldImageId: String(oldImageId || ""),
+    oldMediaId: "",
+    newMediaId: "",
+    newImageId: String(newImg.id),
+    newImageUrl: String(newImg.src || ""),
+    width: Number(newImg.width || 0),
+    height: Number(newImg.height || 0),
+    altText: String(newImg.alt || altText),
+    position: Number(newImg.position || position),
+    variantIds: Array.isArray(newImg.variant_ids)
+      ? newImg.variant_ids.map(String)
+      : numericVariants.map(String),
+  };
+}
+
+/**
+ * Uploads a compressed image binary to Shopify via GraphQL staged upload,
+ * waits for READY status, re-links variants and gallery position cleanly,
+ * and removes the old uncompressed media only after the replacement succeeds.
+ */
+export async function replaceProductImageWithCompressed({
+  storeDomain,
+  token,
+  apiVersion,
+  productId,
+  imageId,
+  mediaId = "",
+  buffer,
+  filename,
+  mimeType,
+  altText = "",
+  position = 1,
+  variantIds = [],
+}) {
+  const productGid = toProductGid(productId);
+  const snapshot = await fetchProductMediaSnapshot({
+    storeDomain,
+    token,
+    apiVersion,
+    productId,
+  });
+
+  const cleanImageId = String(imageId || "").trim();
+  const cleanMediaGid = mediaId ? toMediaImageGid(mediaId) : "";
+  const oldIndex = snapshot.mediaNodes.findIndex(
+    (node) =>
+      (cleanMediaGid && node.id === cleanMediaGid) ||
+      (cleanImageId &&
+        (fromProductGid(node.image?.id) === cleanImageId ||
+          fromProductGid(node.id) === cleanImageId)),
+  );
+  const oldMediaNode = oldIndex >= 0 ? snapshot.mediaNodes[oldIndex] : null;
+  if (!oldMediaNode) {
+    throw new Error(`Original product image ${imageId || mediaId} was not found on product ${productId}.`);
+  }
+
+  const resolvedAlt = String(altText || oldMediaNode.alt || "").trim();
+  const targetPosition = oldIndex >= 0 ? oldIndex : Math.max(0, Number(position || 1) - 1);
+
+  const matchedVariantGids = new Set();
+  for (const v of snapshot.variantNodes) {
+    const usesOldMedia = (v.media?.nodes || []).some((m) => m.id === oldMediaNode.id);
+    const usesOldImage = cleanImageId && fromProductGid(v.image?.id) === cleanImageId;
+    if (usesOldMedia || usesOldImage) {
+      matchedVariantGids.add(v.id);
+    }
+  }
+  for (const vid of Array.isArray(variantIds) ? variantIds : []) {
+    const gid = toVariantGid(vid);
+    if (gid) matchedVariantGids.add(gid);
+  }
+
+  // Step 1: Request staged upload target
+  let stagedData;
+  try {
+    stagedData = await shopifyGraphqlRequest({
+      storeDomain,
+      token,
+      apiVersion,
+      query: `
+        mutation StagedImageUpload($input: [StagedUploadInput!]!) {
+          stagedUploadsCreate(input: $input) {
+            stagedTargets {
+              url
+              resourceUrl
+              parameters {
+                name
+                value
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      variables: {
+        input: [
+          {
+            filename,
+            mimeType,
+            resource: "IMAGE",
+            httpMethod: "POST",
+            fileSize: String(buffer.length),
+          },
+        ],
+      },
+    });
+  } catch (stagedError) {
+    if (/access\s*denied/i.test(String(stagedError?.message || "")) && cleanImageId) {
+      return replaceProductImageViaRestFallback({
+        storeDomain,
+        token,
+        apiVersion,
+        productId,
+        oldImageId: cleanImageId,
+        buffer,
+        filename,
+        altText: resolvedAlt,
+        position: targetPosition + 1,
+        variantIds: Array.from(matchedVariantGids),
+      });
+    }
+    throw stagedError;
+  }
+
+  const stagedErrors = stagedData?.stagedUploadsCreate?.userErrors || [];
+  if (stagedErrors.length) {
+    throw new Error(stagedErrors.map((e) => e.message).join(", "));
+  }
+  const stagedTarget = stagedData?.stagedUploadsCreate?.stagedTargets?.[0];
+  if (!stagedTarget?.resourceUrl) {
+    throw new Error("Shopify did not return a staged resourceUrl for compressed image.");
+  }
+
+  // Step 2: Upload binary bytes to Shopify GCS/S3 staged target
+  await uploadBufferToStagedTarget({
+    stagedTarget,
+    buffer,
+    filename,
+    mimeType,
+  });
+
+  // Step 3: Attach new compressed image to product (old image stays intact until READY!)
+  const createMediaData = await shopifyGraphqlRequest({
+    storeDomain,
+    token,
+    apiVersion,
+    query: `
+      mutation AttachCompressedProductMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+        productCreateMedia(productId: $productId, media: $media) {
+          media {
+            id
+            status
+            mediaContentType
+          }
+          mediaUserErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    variables: {
+      productId: productGid,
+      media: [
+        {
+          mediaContentType: "IMAGE",
+          originalSource: stagedTarget.resourceUrl,
+          alt: resolvedAlt,
+        },
+      ],
+    },
+  });
+
+  const mediaErrors = createMediaData?.productCreateMedia?.mediaUserErrors || [];
+  if (mediaErrors.length) {
+    throw new Error(mediaErrors.map((e) => e.message).join(", "));
+  }
+  const createdMediaId = createMediaData?.productCreateMedia?.media?.[0]?.id;
+  if (!createdMediaId) {
+    throw new Error("Shopify did not return a created MediaImage ID.");
+  }
+
+  let readyMedia = null;
+  try {
+    // Step 4: Wait until Shopify CDN finishes ingesting the new compressed media
+    readyMedia = await pollMediaReady({
+      storeDomain,
+      token,
+      apiVersion,
+      mediaGid: createdMediaId,
+    });
+
+    // Step 5: Re-bind any product variants pointing to the old image
+    if (matchedVariantGids.size > 0) {
+      const variantsInput = Array.from(matchedVariantGids).map((variantId) => ({
+        id: variantId,
+        mediaId: createdMediaId,
+      }));
+
+      for (let retry = 0; retry < 2; retry += 1) {
+        const variantRes = await shopifyGraphqlRequest({
+          storeDomain,
+          token,
+          apiVersion,
+          query: `
+            mutation RebindVariantMedia($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+              productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+                userErrors {
+                  code
+                  field
+                  message
+                }
+              }
+            }
+          `,
+          variables: {
+            productId: productGid,
+            variants: variantsInput,
+          },
+        });
+
+        const vErrors = variantRes?.productVariantsBulkUpdate?.userErrors || [];
+        if (!vErrors.length) break;
+        const isPropagationLag = vErrors.some((e) => e.code === "MUST_BE_FOR_THIS_PRODUCT");
+        if (isPropagationLag && retry === 0) {
+          await sleep(600);
+          continue;
+        }
+        throw new Error(vErrors.map((e) => e.message).join(", "));
+      }
+    }
+
+    // Step 6: Preserve exact gallery position before deleting the old asset
+    if (targetPosition >= 0) {
+      const reorderRes = await shopifyGraphqlRequest({
+        storeDomain,
+        token,
+        apiVersion,
+        query: `
+          mutation ReorderCompressedMedia($productId: ID!, $moves: [MoveInput!]!) {
+            productReorderMedia(productId: $productId, moves: $moves) {
+              userErrors {
+                field
+                message
+              }
+            }
+          }
+        `,
+        variables: {
+          productId: productGid,
+          moves: [{ id: createdMediaId, newPosition: String(targetPosition) }],
+        },
+      });
+      const rErrors = reorderRes?.productReorderMedia?.userErrors || [];
+      if (rErrors.length) {
+        console.warn("Media reorder warning:", rErrors);
+      }
+    }
+  } catch (error) {
+    // Cleanup the orphan new media so original image remains cleanly untouched
+    await deleteProductMediaNodes({
+      storeDomain,
+      token,
+      apiVersion,
+      productGid,
+      mediaIds: [createdMediaId],
+    }).catch(() => {});
+    throw error;
+  }
+
+  // Step 7: Safely remove the old heavy media once the compressed replacement is live & bound
+  await deleteProductMediaNodes({
+    storeDomain,
+    token,
+    apiVersion,
+    productGid,
+    mediaIds: [oldMediaNode.id],
+  });
+
+  return {
+    productId: String(productId),
+    oldImageId: cleanImageId,
+    oldMediaId: oldMediaNode.id,
+    newMediaId: createdMediaId,
+    newImageId: fromProductGid(readyMedia?.image?.id || createdMediaId),
+    newImageUrl: String(readyMedia?.image?.url || ""),
+    width: Number(readyMedia?.image?.width || 0),
+    height: Number(readyMedia?.image?.height || 0),
+    altText: String(readyMedia?.alt || resolvedAlt),
+    position: targetPosition + 1,
+    variantIds: Array.from(matchedVariantGids).map(fromProductGid),
+  };
 }

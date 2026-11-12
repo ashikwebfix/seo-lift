@@ -1,4 +1,5 @@
 import { mapShopifyProductToSeoRow } from "../mappers/product.mapper.js";
+import { CREDIT_COSTS } from "../utils/credits.js";
 import { AI_FEATURES_ENABLED } from "../utils/feature-flags.js";
 import { DEFAULT_GEMINI_MODEL } from "../utils/gemini-models.js";
 import {
@@ -11,6 +12,17 @@ import {
   validateProductTitle,
   validateUrlHandle,
 } from "../validators/seoValidators.js";
+import {
+  analyzeImageSizeHealth,
+  formatBytes,
+  normalizeCompressionOptions,
+  summarizeCompressionRows,
+} from "../validators/imageCompression.js";
+import {
+  compressImageBuffer,
+  downloadImageBuffer,
+  probeImageRowsBatch,
+} from "./image-compression.server.js";
 import { generateProductSeoFix, generateVisionImageAlt } from "./ai-provider.server.js";
 import { getAppState, updateAppState } from "./app-state.server.js";
 import { checkCreditBalance, deductCredits } from "./credit-manager.server.js";
@@ -24,12 +36,14 @@ import {
   fetchProducts,
   fetchProductsByIds,
   getShopContext,
+  replaceProductImageWithCompressed,
   updateProductImageAlt,
   updateProductSeo,
 } from "./shopify-admin.server.js";
 import {
   checkStoreRouteAccess,
   getEffectivePlatformAiSettings,
+  getOrCreateStoreControl,
 } from "./store-control.server.js";
 import prisma from "../db.server.js";
 
@@ -139,6 +153,97 @@ export async function loadProductsPage({
   };
 }
 
+function normalizeImageCompressionFilter(value) {
+  const clean = String(value || "all").trim().toLowerCase();
+  if (clean === "needs-optimization" || clean === "critical" || clean === "optimal") {
+    return clean;
+  }
+  return "all";
+}
+
+function buildSafeImageFilename({ productHandle, productTitle, position, extension }) {
+  const baseRaw = String(productHandle || productTitle || "product-image")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  const base = baseRaw || "product-image";
+  const pos = Math.max(1, Number(position || 1));
+  const ext = String(extension || "jpg").replace(/[^a-z0-9]/gi, "").toLowerCase() || "jpg";
+  return `${base}-v${pos}-opt.${ext}`;
+}
+
+async function appendImageCompressionHistory({
+  shop,
+  status,
+  preset,
+  attempted = 0,
+  compressed = 0,
+  skipped = 0,
+  failed = 0,
+  bytesBefore = 0,
+  bytesAfter = 0,
+  bytesSaved = 0,
+  note = "",
+}) {
+  const entry = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: new Date().toISOString(),
+    status: status === "failed" ? "failed" : "success",
+    preset: String(preset || "pagespeed_balanced"),
+    attempted: Number(attempted || 0),
+    compressed: Number(compressed || 0),
+    skipped: Number(skipped || 0),
+    failed: Number(failed || 0),
+    bytesBefore: Number(bytesBefore || 0),
+    bytesAfter: Number(bytesAfter || 0),
+    bytesSaved: Number(bytesSaved || 0),
+    note: String(note || ""),
+  };
+
+  if (!shop) {
+    return {
+      entry,
+      history: [entry],
+      stats: {
+        totalImagesOptimized: compressed,
+        totalBytesBefore: bytesBefore,
+        totalBytesAfter: bytesAfter,
+        totalBytesSaved: bytesSaved,
+        lastRunAt: entry.createdAt,
+      },
+      lastRun: entry,
+    };
+  }
+
+  const next = await updateAppState(shop, (current) => {
+    const prevStats = current.imageCompressionStats || {};
+    const nextStats = {
+      totalImagesOptimized: Number(prevStats.totalImagesOptimized || 0) + Number(compressed || 0),
+      totalBytesBefore: Number(prevStats.totalBytesBefore || 0) + Number(bytesBefore || 0),
+      totalBytesAfter: Number(prevStats.totalBytesAfter || 0) + Number(bytesAfter || 0),
+      totalBytesSaved: Number(prevStats.totalBytesSaved || 0) + Number(bytesSaved || 0),
+      lastRunAt: compressed > 0 ? entry.createdAt : prevStats.lastRunAt || null,
+    };
+    return {
+      ...current,
+      imageCompressionHistory: [entry, ...(current.imageCompressionHistory || [])].slice(
+        0,
+        IMAGE_HISTORY_LIMIT,
+      ),
+      imageCompressionStats: nextStats,
+    };
+  });
+
+  const history = Array.isArray(next.imageCompressionHistory) ? next.imageCompressionHistory : [];
+  return {
+    entry,
+    history,
+    stats: next.imageCompressionStats || {},
+    lastRun: history[0] || null,
+  };
+}
+
 export async function loadImageOptimizerPage({
   shop,
   storeDomain,
@@ -148,7 +253,10 @@ export async function loadImageOptimizerPage({
   pageInfo = "",
   query = "",
   statusFilter = "all",
+  tab = "alt",
+  compressionFilter = "all",
 }) {
+  const activeTab = String(tab || "alt").trim().toLowerCase() === "compression" ? "compression" : "alt";
   const { rows, pagination } = await fetchProductImages({
     storeDomain,
     token,
@@ -158,7 +266,7 @@ export async function loadImageOptimizerPage({
     query,
   });
 
-  const normalizedRows = rows.map((row) => {
+  let workingRows = rows.map((row) => {
     const validation = validateImageAlt(row.altText);
     return {
       ...row,
@@ -171,21 +279,62 @@ export async function loadImageOptimizerPage({
       validation,
     };
   });
+
+  let compressionSummary = null;
+  if (activeTab === "compression") {
+    workingRows = await probeImageRowsBatch(workingRows, { concurrency: 6 });
+    compressionSummary = summarizeCompressionRows(workingRows);
+  }
+
   const filter = normalizeImageStatusFilter(statusFilter);
-  const filteredRows = normalizedRows.filter((row) => {
+  const compFilter = normalizeImageCompressionFilter(compressionFilter);
+
+  const filteredRows = workingRows.filter((row) => {
+    if (activeTab === "compression") {
+      if (compFilter === "all") return true;
+      const h = row.sizeHealth || analyzeImageSizeHealth(row);
+      if (compFilter === "critical") return h.status === "critical";
+      if (compFilter === "needs-optimization") return h.needsOptimization;
+      if (compFilter === "optimal") return h.status === "optimal";
+      return true;
+    }
+
     if (filter === "all") return true;
     const needsFix = !row.validation.valid || row.validation.generic || row.validation.tooShort;
     return filter === "needs-fix" ? needsFix : !needsFix;
   });
+
   const pageCheck = validateImageAltRows(filteredRows);
-  const appState = shop ? await getAppState(shop) : { imageOptimizerHistory: [] };
+  const appState = shop
+    ? await getAppState(shop)
+    : {
+        imageOptimizerHistory: [],
+        imageCompressionHistory: [],
+        imageCompressionStats: {},
+      };
   const history = Array.isArray(appState.imageOptimizerHistory) ? appState.imageOptimizerHistory : [];
+  const compressionHistory = Array.isArray(appState.imageCompressionHistory)
+    ? appState.imageCompressionHistory
+    : [];
+  const compressionStats = appState.imageCompressionStats || {
+    totalImagesOptimized: 0,
+    totalBytesBefore: 0,
+    totalBytesAfter: 0,
+    totalBytesSaved: 0,
+    lastRunAt: null,
+  };
 
   return {
+    tab: activeTab,
     rows: filteredRows,
     pagination,
     summary: pageCheck.summary,
     statusFilter: filter,
+    compressionFilter: compFilter,
+    compressionSummary: compressionSummary || summarizeCompressionRows(filteredRows),
+    compressionStats,
+    compressionHistory: compressionHistory.slice(0, IMAGE_HISTORY_LIMIT),
+    lastCompressionRun: compressionHistory[0] || null,
     history: history.slice(0, IMAGE_HISTORY_LIMIT),
     lastRun: history[0] || null,
   };
@@ -432,6 +581,7 @@ export async function runAiAutoFixProducts({
   if (!hasSuperAccess && !initialBalance.allowed) {
     return {
       ok: false,
+      outOfCredits: true,
       error: `Insufficient AI tokens. Auto-fix requires ${initialBalance.cost} tokens per product, but you have ${initialBalance.availableCredits} remaining.`,
     };
   }
@@ -1030,6 +1180,368 @@ export async function applyImageAltFixesAndRescan({
     summary: appliedCheck.summary,
     history: historyState.history,
     lastRun: historyState.lastRun,
+  };
+}
+
+export async function previewImageCompressionBatch({
+  rows = [],
+  compressionOptions = {},
+}) {
+  const safeRows = (Array.isArray(rows) ? rows : []).filter((r) => r?.id && r?.imageUrl);
+  if (!safeRows.length) {
+    return {
+      ok: false,
+      error: "Select at least one image row to estimate compression savings.",
+      previews: [],
+    };
+  }
+
+  const options = normalizeCompressionOptions(compressionOptions);
+  const previews = new Array(safeRows.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < safeRows.length) {
+      const idx = cursor;
+      cursor += 1;
+      const row = safeRows[idx];
+      try {
+        const downloaded = await downloadImageBuffer(row.imageUrl);
+        const compressed = await compressImageBuffer(downloaded.buffer, options);
+        previews[idx] = {
+          id: String(row.id),
+          ok: true,
+          skipped: compressed.skipped,
+          reason: compressed.reason,
+          originalBytes: compressed.originalBytes,
+          compressedBytes: compressed.compressedBytes,
+          savedBytes: compressed.savedBytes,
+          savedPercent: compressed.savedPercent,
+          originalWidth: compressed.originalWidth,
+          originalHeight: compressed.originalHeight,
+          width: compressed.width,
+          height: compressed.height,
+          originalFormat: compressed.originalFormat,
+          format: compressed.format,
+          resized: compressed.resized,
+          formatChanged: compressed.formatChanged,
+        };
+      } catch (error) {
+        previews[idx] = {
+          id: String(row.id),
+          ok: false,
+          skipped: false,
+          error: error?.message || "Failed to analyze image bytes.",
+        };
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(3, safeRows.length) }, () => worker()));
+
+  let totalOriginalBytes = 0;
+  let totalCompressedBytes = 0;
+  let totalSavedBytes = 0;
+  let optimizableCount = 0;
+
+  for (const item of previews) {
+    if (!item?.ok) continue;
+    totalOriginalBytes += Number(item.originalBytes || 0);
+    totalCompressedBytes += Number(item.compressedBytes || 0);
+    totalSavedBytes += Number(item.savedBytes || 0);
+    if (!item.skipped && item.savedBytes > 0) {
+      optimizableCount += 1;
+    }
+  }
+
+  const totalSavedPercent =
+    totalOriginalBytes > 0
+      ? Math.round((totalSavedBytes / totalOriginalBytes) * 1000) / 10
+      : 0;
+
+  return {
+    ok: true,
+    options,
+    previews,
+    totals: {
+      checked: previews.length,
+      optimizableCount,
+      totalOriginalBytes,
+      totalCompressedBytes,
+      totalSavedBytes,
+      totalSavedPercent,
+    },
+  };
+}
+
+export async function applyImageCompressionBatch({
+  shop,
+  storeDomain,
+  token,
+  apiVersion,
+  rows = [],
+  compressionOptions = {},
+  hasSuperAccess,
+}) {
+  const safeRows = (Array.isArray(rows) ? rows : []).filter(
+    (r) => r?.id && r?.productId && r?.imageUrl,
+  );
+  const options = normalizeCompressionOptions(compressionOptions);
+
+  if (!safeRows.length) {
+    const historyState = await appendImageCompressionHistory({
+      shop,
+      status: "failed",
+      preset: options.preset,
+      attempted: 0,
+      note: "No valid product images were selected for compression.",
+    });
+
+    return {
+      ok: false,
+      error: "Select at least one image row with a valid URL to compress.",
+      results: [],
+      compressionHistory: historyState.history,
+      compressionStats: historyState.stats,
+      lastCompressionRun: historyState.lastRun,
+    };
+  }
+
+  let effectiveSuperAccess = Boolean(hasSuperAccess);
+  if (shop && typeof hasSuperAccess !== "boolean") {
+    const control = await getOrCreateStoreControl(shop).catch(() => null);
+    effectiveSuperAccess = Boolean(control?.superAccess);
+  }
+
+  let creditsDeducted = 0;
+  let creditsRemaining;
+  let accountPlan = "FREE";
+  let stoppedReason = "";
+
+  if (shop && !effectiveSuperAccess) {
+    const initialBalance = await checkCreditBalance(shop, "image_compression");
+    creditsRemaining = initialBalance.availableCredits;
+    accountPlan = initialBalance.plan || "FREE";
+    if (!initialBalance.allowed) {
+      return {
+        ok: false,
+        outOfCredits: true,
+        error: `Insufficient AI tokens. Image compression requires ${initialBalance.cost} token per compressed image, but you have ${initialBalance.availableCredits} remaining.`,
+        results: [],
+        creditsDeducted: 0,
+        creditsRemaining: initialBalance.availableCredits,
+        plan: accountPlan,
+        superAccess: false,
+      };
+    }
+  } else if (shop && effectiveSuperAccess) {
+    const initialBalance = await checkCreditBalance(shop, "image_compression").catch(() => null);
+    creditsRemaining = initialBalance?.availableCredits;
+    accountPlan = initialBalance?.plan || "PRO";
+  }
+
+  const results = [];
+  let compressedCount = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
+  let totalBytesBefore = 0;
+  let totalBytesAfter = 0;
+  let totalBytesSaved = 0;
+
+  for (const row of safeRows) {
+    if (shop && !effectiveSuperAccess && compressedCount > 0) {
+      const stepBalance = await checkCreditBalance(shop, "image_compression");
+      creditsRemaining = stepBalance.availableCredits;
+      if (!stepBalance.allowed) {
+        stoppedReason = `Stopped after ${compressedCount} compressed image(s): insufficient remaining AI tokens (${stepBalance.availableCredits} left, requires ${CREDIT_COSTS.image_compression}/image).`;
+        break;
+      }
+    }
+
+    try {
+      const downloaded = await downloadImageBuffer(row.imageUrl);
+      const compressed = await compressImageBuffer(downloaded.buffer, options);
+
+      if (compressed.skipped) {
+        skippedCount += 1;
+        results.push({
+          id: String(row.id),
+          productId: String(row.productId),
+          productTitle: row.productTitle || "",
+          ok: true,
+          skipped: true,
+          reason: compressed.reason || "Already optimal.",
+          originalBytes: compressed.originalBytes,
+          compressedBytes: compressed.originalBytes,
+          savedBytes: 0,
+          savedPercent: 0,
+          width: compressed.width,
+          height: compressed.height,
+          format: compressed.format,
+        });
+        continue;
+      }
+
+      const filename = buildSafeImageFilename({
+        productHandle: row.productHandle,
+        productTitle: row.productTitle,
+        position: row.position,
+        extension: compressed.extension,
+      });
+
+      const replaced = await replaceProductImageWithCompressed({
+        storeDomain,
+        token,
+        apiVersion,
+        productId: row.productId,
+        imageId: row.id,
+        buffer: compressed.buffer,
+        filename,
+        mimeType: compressed.mimeType,
+        altText: row.altText || "",
+        position: row.position || 1,
+        variantIds: row.variantIds || [],
+      });
+
+      const finalWidth = Number(replaced.width || compressed.width || row.width || 0);
+      const finalHeight = Number(replaced.height || compressed.height || row.height || 0);
+      const sizeHealth = analyzeImageSizeHealth({
+        width: finalWidth,
+        height: finalHeight,
+        fileSizeBytes: compressed.compressedBytes,
+        format: compressed.format,
+      });
+
+      compressedCount += 1;
+      totalBytesBefore += compressed.originalBytes;
+      totalBytesAfter += compressed.compressedBytes;
+      totalBytesSaved += compressed.savedBytes;
+
+      if (shop) {
+        const deduction = await deductCredits({
+          shop,
+          actionType: "image_compression",
+          customCost: CREDIT_COSTS.image_compression,
+          productId: row.productId,
+          productTitle: row.productTitle || `Product #${row.productId}`,
+          modelUsed: "sharp-image-optimizer",
+          bypassLimit: effectiveSuperAccess,
+        });
+        creditsDeducted += deduction.deducted;
+        creditsRemaining = deduction.remainingCredits;
+        accountPlan = deduction.plan || accountPlan;
+      }
+
+      await recordProductRevision({
+        shop,
+        productId: row.productId,
+        productTitle: row.productTitle || `Product #${row.productId}`,
+        changeType: "IMAGE_COMPRESSED",
+        beforeValues: {
+          imageId: String(row.id),
+          imageUrl: row.imageUrl,
+          imageFileSize: formatBytes(compressed.originalBytes),
+          imageDimensions: `${compressed.originalWidth}×${compressed.originalHeight}`,
+          imageFormat: compressed.originalFormat.toUpperCase(),
+        },
+        afterValues: {
+          imageId: replaced.newImageId || String(row.id),
+          imageUrl: replaced.newImageUrl || row.imageUrl,
+          imageFileSize: `${formatBytes(compressed.compressedBytes)} (-${compressed.savedPercent}%)`,
+          imageDimensions: `${finalWidth}×${finalHeight}`,
+          imageFormat: compressed.format.toUpperCase(),
+        },
+      });
+
+      results.push({
+        id: String(row.id),
+        newImageId: replaced.newImageId || String(row.id),
+        newImageUrl: replaced.newImageUrl || row.imageUrl,
+        productId: String(row.productId),
+        productTitle: row.productTitle || "",
+        ok: true,
+        skipped: false,
+        originalBytes: compressed.originalBytes,
+        compressedBytes: compressed.compressedBytes,
+        savedBytes: compressed.savedBytes,
+        savedPercent: compressed.savedPercent,
+        originalWidth: compressed.originalWidth,
+        originalHeight: compressed.originalHeight,
+        width: finalWidth,
+        height: finalHeight,
+        format: compressed.format,
+        sizeHealth,
+      });
+    } catch (error) {
+      failedCount += 1;
+      results.push({
+        id: String(row.id),
+        productId: String(row.productId),
+        productTitle: row.productTitle || "",
+        ok: false,
+        skipped: false,
+        error: error?.message || "Failed to compress and upload image.",
+      });
+    }
+  }
+
+  const savedPercent =
+    totalBytesBefore > 0
+      ? Math.round((totalBytesSaved / totalBytesBefore) * 1000) / 10
+      : 0;
+
+  const noteParts = [];
+  if (compressedCount > 0) {
+    noteParts.push(
+      `Compressed ${compressedCount} image(s), saved ${formatBytes(totalBytesSaved)} (${savedPercent}%).`,
+    );
+  }
+  if (skippedCount > 0) noteParts.push(`${skippedCount} already optimal.`);
+  if (failedCount > 0) noteParts.push(`${failedCount} failed.`);
+  if (stoppedReason) noteParts.push(stoppedReason);
+
+  const historyState = await appendImageCompressionHistory({
+    shop,
+    status: compressedCount === 0 && failedCount > 0 ? "failed" : "success",
+    preset: options.preset,
+    attempted: safeRows.length,
+    compressed: compressedCount,
+    skipped: skippedCount,
+    failed: failedCount,
+    bytesBefore: totalBytesBefore,
+    bytesAfter: totalBytesAfter,
+    bytesSaved: totalBytesSaved,
+    note: noteParts.join(" ") || "No changes applied.",
+  });
+
+  const firstFailure = results.find((item) => !item.ok)?.error || "";
+  const allFailed = compressedCount === 0 && skippedCount === 0 && failedCount > 0;
+
+  return {
+    ok: !allFailed,
+    error: allFailed
+      ? firstFailure || "Failed to compress selected images."
+      : failedCount > 0
+        ? `${failedCount} image(s) failed: ${firstFailure}`
+        : "",
+    options,
+    compressedCount,
+    skippedCount,
+    failedCount,
+    totalBytesBefore,
+    totalBytesAfter,
+    totalBytesSaved,
+    totalSavedPercent: savedPercent,
+    creditsDeducted,
+    creditsRemaining,
+    plan: accountPlan,
+    superAccess: effectiveSuperAccess,
+    stoppedReason,
+    outOfCredits: Boolean(stoppedReason),
+    results,
+    compressionHistory: historyState.history,
+    compressionStats: historyState.stats,
+    lastCompressionRun: historyState.lastRun,
   };
 }
 

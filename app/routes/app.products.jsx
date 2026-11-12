@@ -1010,11 +1010,11 @@ export default function ProductSeoRoute() {
                                 type="button"
                                 onClick={() => runAiFix(row, "full")}
                                 disabled={isAiBusy}
-                                title={`Optimizes title, keyword, metadata & writes rich structured description HTML (${CREDIT_COSTS.product_seo_fix} tokens)`}
+                                title={`Optimizes title, keyword, metadata & writes rich structured description HTML (${CREDIT_COSTS.product_seo_full} tokens)`}
                               >
                                 {isAiBusy && aiActionLabel === "full"
                                   ? "Generating..."
-                                  : `⚡ AI Full SEO + Content (${CREDIT_COSTS.product_seo_fix} tok)`}
+                                  : `⚡ AI Full SEO + Content (${CREDIT_COSTS.product_seo_full} tok)`}
                               </button>
                               <button
                                 className="seo-button secondary"

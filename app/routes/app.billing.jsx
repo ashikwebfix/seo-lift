@@ -6,9 +6,11 @@ import {
   useNavigation,
   useActionData,
   useLocation,
+  useSubmit,
 } from "react-router";
 import { useEffect } from "react";
 import seoStyles from "../styles/seo.css?url";
+import { TokenPricingAndCalculator } from "../components/token-pricing-calculator";
 import { showToast } from "../components/toast-viewport";
 import { requireShopContext } from "../services/route-context.server";
 import {
@@ -224,12 +226,13 @@ export const action = async ({ request }) => {
 // ─── UI ────────────────────────────────────────────────────────────────────────
 
 const CREDIT_COST_ITEMS = [
-  { key: "meta_fix", label: "Meta Tag Fix", defaultCost: CLIENT_CREDIT_COSTS.meta_fix },
-  { key: "product_content_fix", label: "AI Copy Polish / Bullets", defaultCost: CLIENT_CREDIT_COSTS.product_content_fix },
-  { key: "product_content_expand", label: "Full AI Description (120–190w)", defaultCost: CLIENT_CREDIT_COSTS.product_content_expand },
+  { key: "ai_chat", label: "AI Chat Reply", defaultCost: CLIENT_CREDIT_COSTS.ai_chat },
+  { key: "image_compression", label: "Image Compression", defaultCost: CLIENT_CREDIT_COSTS.image_compression },
+  { key: "product_seo_fix", label: "Title, Meta & Keyword Fix", defaultCost: CLIENT_CREDIT_COSTS.product_seo_fix },
+  { key: "meta_fix", label: "Meta Tag AI Fix", defaultCost: CLIENT_CREDIT_COSTS.meta_fix },
+  { key: "product_content_fix", label: "Description Fix (HTML)", defaultCost: CLIENT_CREDIT_COSTS.product_content_fix },
+  { key: "product_seo_full", label: "Full SEO + Description", defaultCost: CLIENT_CREDIT_COSTS.product_seo_full },
   { key: "robots_txt_improvement", label: "AI Robots.txt Rules", defaultCost: CLIENT_CREDIT_COSTS.robots_txt_improvement },
-  { key: "product_seo_minor", label: "Product SEO Minor Polish", defaultCost: CLIENT_CREDIT_COSTS.product_seo_minor },
-  { key: "product_seo_fix", label: "Full Product SEO + Content", defaultCost: CLIENT_CREDIT_COSTS.product_seo_fix },
   { key: "audit_change", label: "Gemini Diff Audit", defaultCost: CLIENT_CREDIT_COSTS.audit_change },
   { key: "vision_alt", label: "Vision Image ALT", defaultCost: CLIENT_CREDIT_COSTS.vision_alt },
   { key: "pagespeed_ai_fix", label: "PageSpeed AI Fix Plan", defaultCost: CLIENT_CREDIT_COSTS.pagespeed_ai_fix },
@@ -253,6 +256,7 @@ export default function BillingPage() {
   const submitting = navigation.state === "submitting";
   const actionData = useActionData();
   const location = useLocation();
+  const submit = useSubmit();
   const submittingIntent = navigation.formData?.get("intent");
   const submittingPackageId = navigation.formData?.get("packageId");
 
@@ -418,6 +422,20 @@ export default function BillingPage() {
             </div>
           </div>
         </div>
+
+        {/* ─── Interactive Token Calculator & Pricing List ─── */}
+        <TokenPricingAndCalculator
+          id="token-calculator"
+          creditAccount={creditAccount}
+          hasSuperAccess={hasSuperAccess}
+          onBillingPage={true}
+          onSelectTopUp={
+            !hasSuperAccess
+              ? (pkg) => submit({ intent: "buyPack", packageId: pkg.id }, { method: "post" })
+              : null
+          }
+          locationSearch={location.search}
+        />
 
         {/* ─── One-Time AI Token Top-Up Packages ─── */}
         {!hasSuperAccess ? (

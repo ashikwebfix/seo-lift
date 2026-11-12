@@ -10,6 +10,7 @@ import {
   validateUrlHandle,
 } from "../validators/seoValidators.js";
 import { DEFAULT_GEMINI_MODEL } from "../utils/gemini-models.js";
+import { CREDIT_COSTS, estimateChatActionTokens } from "../utils/credits.js";
 
 export const DEFAULT_AI_SETTINGS = Object.freeze({
   provider: "gemini",
@@ -992,4 +993,517 @@ Return JSON only:
         })
       : [],
   };
+}
+
+export const AI_CHAT_ACTION_TYPES = Object.freeze([
+  "RUN_FULL_SCAN",
+  "AUTO_FIX_PRODUCTS",
+  "FIX_PRODUCT_DESCRIPTION",
+  "UPDATE_SPECIFIC_PRODUCT",
+  "FIX_IMAGE_ALT",
+  "COMPRESS_HEAVY_IMAGES",
+  "FIX_ROBOTS_TXT",
+  "REGENERATE_SITEMAP",
+  "RUN_PAGESPEED_TEST",
+  "TOGGLE_AUTOPILOT",
+  "ROLLBACK_REVISION",
+  "OPEN_ROUTE",
+]);
+
+const ALLOWED_CHAT_ROUTES = new Set([
+  "/app",
+  "/app/seo-audit",
+  "/app/products",
+  "/app/image-optimizer",
+  "/app/bulk-meta",
+  "/app/url-optimization",
+  "/app/pagespeed",
+  "/app/robots",
+  "/app/sitemap",
+  "/app/revisions",
+  "/app/settings",
+  "/app/billing",
+]);
+
+function clampInt(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(num)));
+}
+
+function sanitizeChatActionParams(type, rawParams = {}) {
+  const params = rawParams && typeof rawParams === "object" ? rawParams : {};
+  switch (type) {
+    case "AUTO_FIX_PRODUCTS": {
+      const productIds = Array.isArray(params.productIds)
+        ? params.productIds.map((id) => cleanText(id, 120)).filter(Boolean).slice(0, 5)
+        : [];
+      return {
+        maxProducts: clampInt(params.maxProducts, 1, 5, 3),
+        productIds,
+      };
+    }
+    case "FIX_PRODUCT_DESCRIPTION": {
+      const productIds = Array.isArray(params.productIds)
+        ? params.productIds.map((id) => cleanText(id, 120)).filter(Boolean).slice(0, 5)
+        : [];
+      const goal = ["expand", "polish", "structure"].includes(String(params.goal || ""))
+        ? String(params.goal)
+        : "expand";
+      return {
+        maxProducts: clampInt(params.maxProducts, 1, 5, productIds.length || 1),
+        productIds,
+        goal,
+      };
+    }
+    case "UPDATE_SPECIFIC_PRODUCT": {
+      const next = {
+        productId: cleanText(params.productId || params.id || "", 120),
+      };
+      if (typeof params.title === "string" && params.title.trim()) {
+        next.title = cleanText(params.title, 255);
+      }
+      if (typeof params.focusKeyword === "string" && params.focusKeyword.trim()) {
+        next.focusKeyword = cleanText(params.focusKeyword, 80);
+      }
+      if (typeof params.metaTitle === "string" && params.metaTitle.trim()) {
+        next.metaTitle = cleanText(params.metaTitle, 120);
+      }
+      if (typeof params.metaDescription === "string" && params.metaDescription.trim()) {
+        next.metaDescription = cleanText(params.metaDescription, 220);
+      }
+      if (typeof params.handle === "string" && params.handle.trim()) {
+        next.handle = cleanText(params.handle, 120).toLowerCase();
+      }
+      return next;
+    }
+    case "FIX_IMAGE_ALT": {
+      const productIds = Array.isArray(params.productIds)
+        ? params.productIds.map((id) => cleanText(id, 120)).filter(Boolean).slice(0, 10)
+        : [];
+      return {
+        maxImages: clampInt(params.maxImages, 1, 20, 10),
+        productIds,
+        useAi: Boolean(params.useAi),
+      };
+    }
+    case "COMPRESS_HEAVY_IMAGES": {
+      const preset = ["balanced", "lossless", "high"].includes(String(params.preset || ""))
+        ? String(params.preset)
+        : "balanced";
+      const productIds = Array.isArray(params.productIds)
+        ? params.productIds.map((id) => cleanText(id, 120)).filter(Boolean).slice(0, 10)
+        : [];
+      return {
+        preset,
+        maxImages: clampInt(params.maxImages, 1, 15, 8),
+        productIds,
+      };
+    }
+    case "FIX_ROBOTS_TXT":
+      return {
+        useAi: Boolean(params.useAi),
+        customRules:
+          typeof params.customRules === "string" ? params.customRules.trim().slice(0, 4000) : "",
+      };
+    case "REGENERATE_SITEMAP":
+      return {
+        extraManualUrl: cleanText(params.extraManualUrl || "", 240),
+      };
+    case "RUN_PAGESPEED_TEST": {
+      const strat = String(params.strategy || "").toLowerCase();
+      return {
+        strategy: strat === "desktop" ? "desktop" : strat === "both" ? "both" : "mobile",
+        targetUrl: cleanText(params.targetUrl || "", 240),
+      };
+    }
+    case "TOGGLE_AUTOPILOT":
+      return {
+        enabled: params.enabled !== false,
+        optimizeMeta: params.optimizeMeta !== false,
+        optimizeAlt: params.optimizeAlt !== false,
+      };
+    case "ROLLBACK_REVISION":
+      return {
+        revisionId: cleanText(params.revisionId || "", 120),
+      };
+    case "OPEN_ROUTE": {
+      const route = cleanText(params.route || "/app/seo-audit", 80);
+      return {
+        route: ALLOWED_CHAT_ROUTES.has(route) ? route : "/app/seo-audit",
+      };
+    }
+    default:
+      return {};
+  }
+}
+
+function defaultActionLabel(type, params = {}) {
+  switch (type) {
+    case "RUN_FULL_SCAN":
+      return "Run Full SEO Audit Scan";
+    case "AUTO_FIX_PRODUCTS":
+      return params.productIds?.length === 1
+        ? "AI Fix Product Meta & Title"
+        : `AI Fix Top ${params.maxProducts || 3} Products`;
+    case "FIX_PRODUCT_DESCRIPTION":
+      return params.productIds?.length === 1
+        ? "AI Fix Product Description"
+        : `AI Fix ${params.maxProducts || 1} Description(s)`;
+    case "UPDATE_SPECIFIC_PRODUCT":
+      return "Save Custom Product SEO";
+    case "FIX_IMAGE_ALT":
+      return `Fix Missing Image ALT (${params.maxImages || 10})`;
+    case "COMPRESS_HEAVY_IMAGES":
+      return `Compress Images (${params.preset || "balanced"})`;
+    case "FIX_ROBOTS_TXT":
+      return params.customRules ? "Update Custom Robots.txt" : "Apply Best-Practice Robots.txt";
+    case "REGENERATE_SITEMAP":
+      return "Regenerate XML Sitemap";
+    case "RUN_PAGESPEED_TEST":
+      return `Run ${params.strategy === "desktop" ? "Desktop" : params.strategy === "both" ? "Mobile & Desktop" : "Mobile"} PageSpeed Test`;
+    case "TOGGLE_AUTOPILOT":
+      return params.enabled === false ? "Disable SEO Autopilot" : "Enable SEO Autopilot";
+    case "ROLLBACK_REVISION":
+      return "Rollback Last SEO Change";
+    case "OPEN_ROUTE":
+      return `Open ${params.route || "/app/seo-audit"}`;
+    default:
+      return "Run Action";
+  }
+}
+
+function defaultActionCostLabel(type, params = {}) {
+  if (type === "OPEN_ROUTE") return "Workspace";
+  const estimate = estimateChatActionTokens({ type, params });
+  if (estimate.estimatedTokens > 0) {
+    return estimate.badgeLabel;
+  }
+  return "Free · Instant";
+}
+
+export function normalizeAiChatCopilotResponse(raw = {}) {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const allowedSet = new Set(AI_CHAT_ACTION_TYPES);
+
+  const rawActions = Array.isArray(input.suggestedActions) ? input.suggestedActions : [];
+  const seenKeys = new Set();
+  const suggestedActions = [];
+
+  for (let i = 0; i < rawActions.length && suggestedActions.length < 4; i += 1) {
+    const item = rawActions[i];
+    const type = String(item?.type || "").trim().toUpperCase();
+    if (!allowedSet.has(type)) continue;
+
+    const params = sanitizeChatActionParams(type, item?.params);
+    if (type === "UPDATE_SPECIFIC_PRODUCT" && !params.productId) continue;
+    const dedupeKey = `${type}:${JSON.stringify(params)}`;
+    if (seenKeys.has(dedupeKey)) continue;
+    seenKeys.add(dedupeKey);
+
+    const tone = ["primary", "secondary", "warning"].includes(String(item?.tone || ""))
+      ? String(item.tone)
+      : suggestedActions.length === 0
+        ? "primary"
+        : "secondary";
+
+    suggestedActions.push({
+      id: cleanText(item?.id || `act-${suggestedActions.length + 1}`, 40) || `act-${suggestedActions.length + 1}`,
+      type,
+      label: cleanText(item?.label || defaultActionLabel(type, params), 60) || defaultActionLabel(type, params),
+      description: cleanText(item?.description || "", 180),
+      tone,
+      costLabel: defaultActionCostLabel(type, params),
+      params,
+    });
+  }
+
+  const rawAutoId = cleanText(input.autoRunActionId || "", 40);
+  const autoAction = suggestedActions.find(
+    (action) => action.id === rawAutoId && action.type !== "OPEN_ROUTE",
+  );
+
+  const quickReplies = Array.isArray(input.quickReplies)
+    ? input.quickReplies
+        .map((q) => cleanText(q, 80))
+        .filter(Boolean)
+        .slice(0, 4)
+    : [];
+
+  return {
+    reply:
+      String(input.reply || "").trim().slice(0, 3500) ||
+      "I checked your current store telemetry. Select a recommended action below to fix issues directly.",
+    suggestedActions,
+    autoRunActionId: autoAction ? autoAction.id : "",
+    quickReplies,
+  };
+}
+
+function buildAiChatFallbackResponse({
+  userMessage = "",
+  storeSnapshot = {},
+  selectedProduct = null,
+  reason = "",
+}) {
+  const lower = String(userMessage || "").toLowerCase();
+  const scan = storeSnapshot?.scan || {};
+  const health = Number.isFinite(Number(scan.healthScore)) ? Number(scan.healthScore) : null;
+  const criticalCount = Number(scan.criticalCount || 0);
+  const missingAlt = Number(scan.missingAltCount || storeSnapshot?.missingAltImages || 0);
+  const metaIssues = Number(scan.metaIssueProducts || 0);
+  const pageSpeedMobile = storeSnapshot?.pageSpeed?.mobileScore;
+
+  const actions = [];
+  if (selectedProduct?.id) {
+    const cleanTitle = cleanText(selectedProduct.title || "Selected Product", 34);
+    actions.push({
+      id: "act-selected-seo",
+      type: "AUTO_FIX_PRODUCTS",
+      label: `AI Fix "${cleanTitle}" (${CREDIT_COSTS.product_seo_fix} tok)`,
+      description: `Optimizes title, focus keyword, meta title, meta description & handle (${CREDIT_COSTS.product_seo_fix} tok).`,
+      tone: "primary",
+      params: { maxProducts: 1, productIds: [String(selectedProduct.id)] },
+    });
+    if (lower.includes("description") || lower.includes("copy") || lower.includes("content")) {
+      actions.push({
+        id: "act-selected-desc",
+        type: "FIX_PRODUCT_DESCRIPTION",
+        label: `AI Fix Description (${CREDIT_COSTS.product_content_fix} tok)`,
+        description: `Rewrites structured HTML product description with headings & bullets (${CREDIT_COSTS.product_content_fix} tok).`,
+        tone: "primary",
+        params: { maxProducts: 1, productIds: [String(selectedProduct.id)], goal: "expand" },
+      });
+    }
+  } else if (lower.includes("description") || lower.includes("copy") || lower.includes("content rewrite")) {
+    actions.push({
+      id: "act-desc-batch",
+      type: "FIX_PRODUCT_DESCRIPTION",
+      label: "AI Fix Top 3 Product Descriptions",
+      description: `Generates rich SEO product description HTML (${CREDIT_COSTS.product_content_fix} tok per product).`,
+      tone: "primary",
+      params: { maxProducts: 3, goal: "expand" },
+    });
+  }
+  if (lower.includes("rollback") || lower.includes("undo") || lower.includes("revert")) {
+    actions.push({
+      id: "act-rollback",
+      type: "ROLLBACK_REVISION",
+      label: "Rollback Last SEO Change",
+      description: "Restores the previous saved version of your last updated product in Shopify.",
+      tone: actions.length === 0 ? "primary" : "secondary",
+      params: {},
+    });
+  }
+  if (lower.includes("compress") || lower.includes("image size") || lower.includes("speed") || lower.includes("lcp") || lower.includes("heavy")) {
+    actions.push({
+      id: "act-compress",
+      type: "COMPRESS_HEAVY_IMAGES",
+      label: selectedProduct?.id ? "Compress Product Images" : "Compress Top 8 Heavy Images (Balanced)",
+      description: "Re-encodes oversized catalog images into sharp, lighter files with zero manual upload.",
+      tone: actions.length === 0 ? "primary" : "secondary",
+      params: selectedProduct?.id
+        ? { preset: "balanced", maxImages: 8, productIds: [String(selectedProduct.id)] }
+        : { preset: "balanced", maxImages: 8 },
+    });
+  }
+  if (lower.includes("alt") || missingAlt > 0) {
+    actions.push({
+      id: "act-alt",
+      type: "FIX_IMAGE_ALT",
+      label: selectedProduct?.id ? "Fix Selected Product ALT" : `Fix Up to 10 Missing ALT Tags`,
+      description: "Generates descriptive SEO ALT text for product images currently missing ALT.",
+      tone: actions.length === 0 ? "primary" : "secondary",
+      params: selectedProduct?.id
+        ? { maxImages: 10, productIds: [String(selectedProduct.id)] }
+        : { maxImages: 10 },
+    });
+  }
+  if (lower.includes("meta") || lower.includes("product") || lower.includes("title") || lower.includes("fix") || metaIssues > 0 || criticalCount > 0) {
+    actions.push({
+      id: "act-products",
+      type: "AUTO_FIX_PRODUCTS",
+      label: "AI Fix Top 3 Priority Products",
+      description: "Uses AI + audit guardrails to repair meta titles, descriptions, keywords, and handles.",
+      tone: actions.length === 0 ? "primary" : "secondary",
+      params: { maxProducts: 3 },
+    });
+  }
+  if (lower.includes("robots")) {
+    actions.push({
+      id: "act-robots",
+      type: "FIX_ROBOTS_TXT",
+      label: "Apply Best-Practice Robots.txt",
+      description: "Updates robots.txt draft rules safely and refreshes audit score.",
+      tone: "secondary",
+      params: { useAi: false },
+    });
+  }
+  if (lower.includes("sitemap")) {
+    actions.push({
+      id: "act-sitemap",
+      type: "REGENERATE_SITEMAP",
+      label: "Regenerate XML Sitemap",
+      description: "Rebuilds storefront sitemap.xml URLs from active products and pages.",
+      tone: "secondary",
+      params: {},
+    });
+  }
+  if (lower.includes("pagespeed") || lower.includes("lighthouse") || lower.includes("cwv")) {
+    actions.push({
+      id: "act-pagespeed",
+      type: "RUN_PAGESPEED_TEST",
+      label: "Run Live Mobile PageSpeed Test",
+      description: "Fetches live Google PageSpeed / Core Web Vitals metrics for your storefront.",
+      tone: "secondary",
+      params: { strategy: "mobile" },
+    });
+  }
+  if (!actions.length || lower.includes("scan") || lower.includes("audit")) {
+    actions.unshift({
+      id: "act-scan",
+      type: "RUN_FULL_SCAN",
+      label: "Run Full Store SEO Scan",
+      description: "Audits all catalog products, meta tags, URLs, and technical SEO health.",
+      tone: "primary",
+      params: {},
+    });
+  }
+
+  const normalized = normalizeAiChatCopilotResponse({
+    reply: [
+      reason ? `Live Gemini AI could not be reached right now (${cleanText(reason, 120)}), so I inspected your local store snapshot instead.` : "",
+      health !== null
+        ? `Current Store SEO Score: ${health}/100 (${criticalCount} critical issues, ${metaIssues} products needing meta/content improvements, ${missingAlt} images missing ALT${pageSpeedMobile != null ? `, Mobile PageSpeed: ${pageSpeedMobile}/100` : ""}).`
+        : "No full SEO scan is cached yet. Start with a full store scan or select an instant fix action below.",
+      "Click any fix button below to apply it immediately inside your store.",
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+    suggestedActions: actions,
+    quickReplies: [
+      "What are my top SEO issues right now?",
+      "Fix my top 3 products automatically",
+      "Compress heavy images for better PageSpeed",
+      "Fix missing image ALT text",
+    ],
+  });
+
+  return {
+    ...normalized,
+    fallbackUsed: true,
+    fallbackReason: cleanText(reason, 180),
+  };
+}
+
+export async function generateAiChatCopilotReply({
+  settings,
+  storeDomain,
+  userMessage,
+  chatHistory = [],
+  storeSnapshot = {},
+  selectedProduct = null,
+  catalogProducts = [],
+}) {
+  const cleanMessage = String(userMessage || "").trim().slice(0, 1500);
+  if (!cleanMessage) {
+    return buildAiChatFallbackResponse({
+      userMessage: "",
+      storeSnapshot,
+      selectedProduct,
+      reason: "Empty prompt.",
+    });
+  }
+
+  const effectiveSettings = resolveEffectiveAiConfig(settings);
+  if (!effectiveSettings.apiKey || effectiveSettings.provider !== "gemini") {
+    return buildAiChatFallbackResponse({
+      userMessage: cleanMessage,
+      storeSnapshot,
+      selectedProduct,
+      reason: "Gemini AI key is not configured in /superadmin.",
+    });
+  }
+
+  const compactHistory = (Array.isArray(chatHistory) ? chatHistory : [])
+    .slice(-8)
+    .map((entry) => ({
+      role: entry?.role === "assistant" ? "assistant" : "user",
+      content: String(entry?.content || "").trim().slice(0, 400),
+      lastActionResult: entry?.actionResult?.summary ? cleanText(entry.actionResult.summary, 180) : undefined,
+    }))
+    .filter((entry) => entry.content);
+
+  const prompt = [
+    "You are EcomSEO AI Autopilot Copilot embedded inside a Shopify merchant's SEO & PageSpeed app.",
+    "The user is chatting in AI Mode and wants concrete analysis AND direct one-click fixes they can execute from this chatbox.",
+    "Always base numbers, product titles, and scores strictly on StoreSnapshot below. Never invent store metrics or claim you already edited Shopify unless the conversation history shows a completed actionResult.",
+    "",
+    "You may recommend up to 4 executable actions from this STRICT allowlist of `type` values:",
+    "- RUN_FULL_SCAN: params {} (runs live full catalog SEO audit; Free)",
+    `- AUTO_FIX_PRODUCTS: params { maxProducts: 1..5, productIds?: string[] } (uses AI + guardrails to optimize product title, focus keyword, meta title, meta description, and handle; ${CREDIT_COSTS.product_seo_fix} tokens per product)`,
+    `- FIX_PRODUCT_DESCRIPTION: params { maxProducts: 1..5, productIds?: string[], goal: 'expand'|'polish'|'structure' } (writes structured SEO HTML product description body copy for selected/top products; ${CREDIT_COSTS.product_content_fix} tokens per product)`,
+    "- UPDATE_SPECIFIC_PRODUCT: params { productId: string, title?: string, focusKeyword?: string, metaTitle?: string, metaDescription?: string, handle?: string } (directly writes exact merchant-requested SEO fields to a Shopify product + creates 301 redirect if handle changed; Free)",
+    `- FIX_IMAGE_ALT: params { maxImages: 1..20, productIds?: string[], useAi?: boolean } (writes SEO ALT text to Shopify product images; heuristic fill is Free, or useAi:true uses Vision AI at ${CREDIT_COSTS.vision_alt} tokens/image)`,
+    `- COMPRESS_HEAVY_IMAGES: params { preset: 'balanced'|'lossless'|'high', maxImages: 1..15, productIds?: string[] } (compresses unoptimized product images via Sharp for faster PageSpeed/LCP; ${CREDIT_COSTS.image_compression} token per compressed image, skipped images cost 0)`,
+    `- FIX_ROBOTS_TXT: params { useAi?: boolean, customRules?: string } (applies best-practice/custom rules [Free] or AI-optimized directives [${CREDIT_COSTS.robots_txt_improvement} tokens])`,
+    "- REGENERATE_SITEMAP: params { extraManualUrl?: string } (rebuilds XML sitemap, optionally adding a custom URL)",
+    "- RUN_PAGESPEED_TEST: params { strategy: 'mobile'|'desktop'|'both', targetUrl?: string } (runs live Google PageSpeed Insights diagnostic)",
+    "- TOGGLE_AUTOPILOT: params { enabled: boolean, optimizeMeta?: boolean, optimizeAlt?: boolean } (enables/disables automatic SEO optimization on new products)",
+    "- ROLLBACK_REVISION: params { revisionId?: string } (safely reverts the latest or specified product SEO change in Shopify)",
+    "- OPEN_ROUTE: params { route: '/app/seo-audit'|'/app/products'|'/app/image-optimizer'|'/app/bulk-meta'|'/app/url-optimization'|'/app/pagespeed'|'/app/robots'|'/app/sitemap'|'/app/revisions'|'/app/settings'|'/app/billing' }",
+    "",
+    "When the user says 'this product', 'selected product', or mentions a product name/handle, look up its exact `id` from `SelectedProduct` or `CatalogProducts` below and populate `productIds: [id]` or `productId: id`!",
+    "After actions finish, a live Before -> After report is automatically rendered in chat.",
+    "",
+    "Return ONLY valid JSON with this exact shape:",
+    JSON.stringify({
+      reply: "Clear, practical response explaining findings in plain merchant language (use concise bullet points when listing issues).",
+      suggestedActions: [
+        {
+          id: "act-1",
+          type: "FIX_IMAGE_ALT",
+          label: "Short button text (<=45 chars)",
+          description: "Exact effect in the merchant's store (<=140 chars)",
+          tone: "primary",
+          params: { maxImages: 10 },
+        },
+      ],
+      autoRunActionId: "Optional: exact id from suggestedActions ONLY if the user explicitly commanded to execute immediately (e.g., 'scan now', 'update this product now', 'fix missing alt now', 'compress my images now', 'enable autopilot'). Otherwise empty string.",
+      quickReplies: ["2-4 short follow-up prompts the user can click next"],
+    }),
+    "",
+    `Store Domain: ${cleanText(storeDomain, 160)}`,
+    selectedProduct ? `SelectedProduct: ${JSON.stringify(selectedProduct)}` : "",
+    Array.isArray(catalogProducts) && catalogProducts.length
+      ? `CatalogProducts: ${JSON.stringify(catalogProducts.slice(0, 25))}`
+      : "",
+    `StoreSnapshot: ${JSON.stringify(storeSnapshot)}`,
+    `Recent Conversation: ${JSON.stringify(compactHistory)}`,
+    `Merchant Message: ${JSON.stringify(cleanMessage)}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  try {
+    const parsed = await requestGeminiJson({
+      model: effectiveSettings.model,
+      apiKey: effectiveSettings.apiKey,
+      prompt,
+      temperature: 0.3,
+    });
+    const normalized = normalizeAiChatCopilotResponse(parsed);
+    return {
+      ...normalized,
+      fallbackUsed: false,
+      modelUsed: effectiveSettings.model,
+    };
+  } catch (error) {
+    return buildAiChatFallbackResponse({
+      userMessage: cleanMessage,
+      storeSnapshot,
+      selectedProduct,
+      reason: error?.message || "Gemini request failed.",
+    });
+  }
 }

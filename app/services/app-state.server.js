@@ -35,9 +35,19 @@ const DEFAULT_PAGESPEED = {
   completedManualIds: [],
 };
 
+const DEFAULT_IMAGE_COMPRESSION_STATS = {
+  totalImagesOptimized: 0,
+  totalBytesBefore: 0,
+  totalBytesAfter: 0,
+  totalBytesSaved: 0,
+  lastRunAt: null,
+};
+
 const DEFAULT_STATE = {
   productSeo: {},
   imageOptimizerHistory: [],
+  imageCompressionHistory: [],
+  imageCompressionStats: { ...DEFAULT_IMAGE_COMPRESSION_STATS },
   lastScan: null,
   scoreHistory: [],
   robotsTxt: DEFAULT_ROBOTS,
@@ -46,6 +56,7 @@ const DEFAULT_STATE = {
   sitemapUrls: [],
   aiSettings: { ...DEFAULT_AI_SETTINGS },
   autopilot: { ...DEFAULT_AUTOPILOT },
+  aiChatHistory: [],
   gsc: { ...DEFAULT_GSC },
   pageSpeed: { ...DEFAULT_PAGESPEED },
 };
@@ -57,13 +68,30 @@ function parseState(jsonText) {
     const parsedAutopilot = parsed.autopilot && typeof parsed.autopilot === "object" ? parsed.autopilot : {};
     const parsedGsc = parsed.gsc && typeof parsed.gsc === "object" ? parsed.gsc : {};
     const parsedPageSpeed = parsed.pageSpeed && typeof parsed.pageSpeed === "object" ? parsed.pageSpeed : {};
+    const parsedCompStats =
+      parsed.imageCompressionStats && typeof parsed.imageCompressionStats === "object"
+        ? parsed.imageCompressionStats
+        : {};
     return {
       ...DEFAULT_STATE,
+      aiChatHistory: Array.isArray(parsed.aiChatHistory) ? parsed.aiChatHistory.slice(-30) : [],
       ...parsed,
       productSeo: parsed.productSeo || {},
       imageOptimizerHistory: Array.isArray(parsed.imageOptimizerHistory)
         ? parsed.imageOptimizerHistory
         : [],
+      imageCompressionHistory: Array.isArray(parsed.imageCompressionHistory)
+        ? parsed.imageCompressionHistory
+        : [],
+      imageCompressionStats: {
+        ...DEFAULT_IMAGE_COMPRESSION_STATS,
+        ...parsedCompStats,
+        totalImagesOptimized: Number(parsedCompStats.totalImagesOptimized || 0),
+        totalBytesBefore: Number(parsedCompStats.totalBytesBefore || 0),
+        totalBytesAfter: Number(parsedCompStats.totalBytesAfter || 0),
+        totalBytesSaved: Number(parsedCompStats.totalBytesSaved || 0),
+        lastRunAt: parsedCompStats.lastRunAt || null,
+      },
       scoreHistory: Array.isArray(parsed.scoreHistory) ? parsed.scoreHistory : [],
       sitemapManualUrls: Array.isArray(parsed.sitemapManualUrls)
         ? parsed.sitemapManualUrls

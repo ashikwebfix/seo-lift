@@ -4,6 +4,7 @@ import {
 } from "../services/ai-fixes.server";
 import {
   auditProductSeoChange,
+  generateAiChatCopilotReply,
   generateAiRobotsSuggestion,
   generateMetaFix,
   generatePageSpeedAiFixPlan,
@@ -13,6 +14,12 @@ import {
   generateVisionImageAlt,
   resolveKeywordCannibalization,
 } from "../services/ai-provider.server.js";
+import {
+  appendAiChatMessages,
+  buildAiChatStoreContext,
+  executeAiChatFixAction,
+  loadAiChatCatalogSummary,
+} from "../services/ai-chat-executor.server.js";
 import { getAppState, updateAppState } from "../services/app-state.server.js";
 import {
   checkCreditBalance,
@@ -64,7 +71,7 @@ export const loader = async ({ request }) => {
 };
 
 export const action = async ({ request }) => {
-  const { shop } = await requireShopContext(request);
+  const { shop, token, apiVersion } = await requireShopContext(request);
   if (!shop) {
     return { ok: false, error: "Shop is required." };
   }
@@ -128,6 +135,132 @@ export const action = async ({ request }) => {
     if (actionType === "robots_txt_improvement" && !payload.useAi) {
       const result = aiRobotsImprovement({ currentRules: payload.currentRules });
       return { ok: true, actionType, result };
+    }
+
+    if (actionType === "get_ai_chat_state") {
+      const [appState, account, catalogProducts] = await Promise.all([
+        getAppState(shop),
+        getOrCreateCreditAccount(shop),
+        loadAiChatCatalogSummary({
+          shop,
+          storeDomain: shop,
+          token,
+          apiVersion,
+          query: String(payload.query || ""),
+          limit: 25,
+        }),
+      ]);
+      return {
+        ok: true,
+        actionType,
+        aiChatHistory: appState?.aiChatHistory || [],
+        storeSnapshot: buildAiChatStoreContext({ shop, appState }),
+        catalogProducts,
+        creditsRemaining: account.availableCredits,
+        totalCredits: account.effectiveTotal,
+        plan: account.plan,
+        superAccess: Boolean(access.control?.superAccess),
+      };
+    }
+
+    if (actionType === "ai_chat_catalog") {
+      const catalogProducts = await loadAiChatCatalogSummary({
+        shop,
+        storeDomain: shop,
+        token,
+        apiVersion,
+        query: String(payload.query || ""),
+        limit: 25,
+      });
+      return {
+        ok: true,
+        actionType,
+        catalogProducts,
+      };
+    }
+
+    if (actionType === "clear_ai_chat_history") {
+      await updateAppState(shop, (current) => ({
+        ...current,
+        aiChatHistory: [],
+      }));
+      return {
+        ok: true,
+        actionType,
+        aiChatHistory: [],
+      };
+    }
+
+    if (actionType === "ai_chat_execute") {
+      const hasSuperAccess = Boolean(access.control?.superAccess);
+      const execAction = payload.action && typeof payload.action === "object" ? payload.action : {};
+      const execution = await executeAiChatFixAction({
+        shop,
+        storeDomain: shop,
+        token,
+        apiVersion,
+        action: execAction,
+        aiSettings,
+        aiAllowed: AI_FEATURES_ENABLED && platformAi.isEnabled && access.allowed,
+        hasSuperAccess,
+      });
+
+      const confirmationMessage = execution?.ok
+        ? {
+            role: "assistant",
+            content: `✅ ${execution.title || "Action complete"}: ${execution.summary || "Done."}`,
+            actionResult: execution,
+          }
+        : {
+            role: "assistant",
+            content: `⚠️ ${execution?.error || "Could not execute that action."}`,
+            actionResult: execution,
+          };
+
+      const aiChatHistory = await appendAiChatMessages(shop, [confirmationMessage], {
+        markActionId: String(execAction?.id || ""),
+        markMessageId: String(payload.messageId || ""),
+        actionResult: execution,
+      });
+
+      const [freshState, freshAccount, freshCatalog] = await Promise.all([
+        getAppState(shop),
+        getOrCreateCreditAccount(shop),
+        loadAiChatCatalogSummary({
+          shop,
+          storeDomain: shop,
+          token,
+          apiVersion,
+          limit: 25,
+        }),
+      ]);
+
+      return {
+        ok: Boolean(execution?.ok),
+        actionType,
+        execution,
+        aiChatHistory,
+        storeSnapshot: buildAiChatStoreContext({ shop, appState: freshState }),
+        catalogProducts: freshCatalog,
+        outOfCredits: Boolean(execution?.outOfCredits),
+        error: execution?.error || "",
+        creditsDeducted: Number(execution?.creditInfo?.creditsDeducted || 0),
+        creditsRemaining:
+          typeof execution?.creditInfo?.creditsRemaining === "number"
+            ? execution.creditInfo.creditsRemaining
+            : freshAccount.availableCredits,
+        totalCredits: freshAccount.effectiveTotal,
+        plan: freshAccount.plan,
+        superAccess: hasSuperAccess,
+      };
+    }
+
+    if (actionType === "ai_chat" && !String(payload.message || "").trim()) {
+      return {
+        ok: false,
+        actionType,
+        error: "Please enter a message or pick a quick prompt.",
+      };
     }
 
     // ─── AI-powered actions with Credit Validation ───────────────────────────
@@ -262,6 +395,49 @@ export const action = async ({ request }) => {
           },
         }));
       }
+    } else if (actionType === "ai_chat") {
+      const userMessage = String(payload.message || "").trim();
+      const [appState, catalogProducts] = await Promise.all([
+        getAppState(shop),
+        loadAiChatCatalogSummary({
+          shop,
+          storeDomain: shop,
+          token,
+          apiVersion,
+          limit: 20,
+        }),
+      ]);
+      const storeSnapshot = buildAiChatStoreContext({ shop, appState });
+      const selectedProduct =
+        payload.selectedProduct && typeof payload.selectedProduct === "object"
+          ? payload.selectedProduct
+          : null;
+      const chatReply = await generateAiChatCopilotReply({
+        settings: aiSettings,
+        storeDomain: shop,
+        userMessage,
+        chatHistory: appState?.aiChatHistory || [],
+        storeSnapshot,
+        selectedProduct,
+        catalogProducts,
+      });
+
+      const aiChatHistory = await appendAiChatMessages(shop, [
+        { role: "user", content: userMessage },
+        {
+          role: "assistant",
+          content: chatReply.reply,
+          suggestedActions: chatReply.suggestedActions,
+          quickReplies: chatReply.quickReplies,
+          fallbackUsed: Boolean(chatReply.fallbackUsed),
+        },
+      ]);
+
+      result = {
+        ...chatReply,
+        aiChatHistory,
+        storeSnapshot,
+      };
     } else {
       return {
         ok: false,
@@ -287,7 +463,14 @@ export const action = async ({ request }) => {
       actionType,
       customCost: actionCost,
       productId: payload.productId || payload.id,
-      productTitle: payload.title || payload.productTitle || (actionType === "store_copilot" ? "Store-wide Copilot" : null),
+      productTitle:
+        payload.title ||
+        payload.productTitle ||
+        (actionType === "store_copilot"
+          ? "Store-wide Copilot"
+          : actionType === "ai_chat"
+            ? "AI Mode Chat"
+            : null),
       modelUsed: aiSettings.model || DEFAULT_GEMINI_MODEL,
       bypassLimit: hasSuperAccess,
     });

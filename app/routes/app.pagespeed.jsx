@@ -990,19 +990,19 @@ export default function PageSpeedDashboardPage() {
                 <div className="seo-grid" style={{ gap: "16px" }}>
                   {/* In-App Manual SEO Fix Shortcuts */}
                   <div className="seo-grid grid-4" style={{ gap: "10px" }}>
+                    <Link to="/app/image-optimizer?tab=compression" className="feature-card">
+                      <h4>🗜️ Compress Images</h4>
+                      <p>Shrink KB size &amp; cap pixels for PageSpeed LCP (0 AI tokens).</p>
+                      <span>Open</span>
+                    </Link>
                     <Link to="/app/image-optimizer?status=needs-fix" className="feature-card">
                       <h4>🖼️ Image ALT &amp; Media</h4>
-                      <p>Fix missing ALT tags &amp; audit heavy product images.</p>
+                      <p>Fix missing ALT tags &amp; audit product image SEO.</p>
                       <span>Open</span>
                     </Link>
                     <Link to="/app/bulk-meta" className="feature-card">
                       <h4>🏷️ Bulk Meta Tags</h4>
                       <p>Fix missing page titles &amp; meta descriptions manually.</p>
-                      <span>Open</span>
-                    </Link>
-                    <Link to="/app/robots" className="feature-card">
-                      <h4>🤖 Robots.txt Crawl</h4>
-                      <p>Inspect live crawl directives &amp; fix blocks.</p>
                       <span>Open</span>
                     </Link>
                     <Link to="/app/url-optimization" className="feature-card">

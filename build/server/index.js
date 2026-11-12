@@ -2,7 +2,7 @@ var _a;
 import { jsx, jsxs, Fragment } from "react/jsx-runtime";
 import { PassThrough } from "stream";
 import { renderToPipeableStream } from "react-dom/server";
-import { ServerRouter, UNSAFE_withComponentProps, Outlet, UNSAFE_withErrorBoundaryProps, isRouteErrorResponse, Meta, Links, ScrollRestoration, Scripts, redirect, useLoaderData, useActionData, Form, useLocation, Link, data, useNavigation, useFetcher, useMatches, useRouteError, useSearchParams } from "react-router";
+import { ServerRouter, UNSAFE_withComponentProps, Outlet, UNSAFE_withErrorBoundaryProps, isRouteErrorResponse, Meta, Links, ScrollRestoration, Scripts, redirect, useLoaderData, useActionData, Form, useLocation, Link, data, useNavigation, useFetcher, useMatches, useNavigate, useRevalidator, useRouteError, useSearchParams, useSubmit } from "react-router";
 import { createReadableStreamFromReadable } from "@react-router/node";
 import { isbot } from "isbot";
 import "@shopify/shopify-app-react-router/adapters/node";
@@ -11,7 +11,7 @@ import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prism
 import { PrismaClient } from "@prisma/client";
 import crypto from "node:crypto";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
-import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo, useId } from "react";
 function createPrismaClient() {
   const client = new PrismaClient();
   client.$queryRawUnsafe("PRAGMA journal_mode = WAL;").catch(() => {
@@ -542,6 +542,351 @@ function mapShopifyProductToSeoRow(product, productState = {}) {
     }
   };
 }
+const PLAN_ALLOWANCES = Object.freeze({
+  FREE: 15,
+  PRO: 50
+});
+const CREDIT_COSTS = Object.freeze({
+  ai_chat: 1,
+  image_compression: 1,
+  meta_fix: 2,
+  product_seo_minor: 2,
+  product_seo_fix: 2,
+  robots_txt_improvement: 2,
+  audit_change: 2,
+  vision_alt: 4,
+  pagespeed_ai_fix: 4,
+  product_content_fix: 6,
+  product_content_expand: 6,
+  catalog_cannibalization: 6,
+  product_seo_full: 8,
+  store_copilot: 10
+});
+const TOKEN_PRICING_CATALOG = Object.freeze([
+  {
+    key: "ai_chat",
+    label: "AI Copilot Chat Message",
+    unit: "per reply",
+    cost: CREDIT_COSTS.ai_chat,
+    category: "AI Chat & Audits",
+    description: "Store-aware Copilot reply & action plan (0 tok if fallback is used)."
+  },
+  {
+    key: "image_compression",
+    label: "Image Compression (Sharp)",
+    unit: "per compressed image",
+    cost: CREDIT_COSTS.image_compression,
+    category: "Images & Speed",
+    description: "Compresses & replaces product image in Shopify. Skipped optimal images cost 0 tok."
+  },
+  {
+    key: "product_seo_fix",
+    label: "Title, Focus Keyword & Meta Fix",
+    unit: "per product",
+    cost: CREDIT_COSTS.product_seo_fix,
+    category: "Product SEO",
+    description: "Optimizes product title, handle, focus keyword, meta title & meta description."
+  },
+  {
+    key: "meta_fix",
+    label: "Bulk Meta Title & Description AI",
+    unit: "per product",
+    cost: CREDIT_COSTS.meta_fix,
+    category: "Product SEO",
+    description: "Generates SERP-compliant meta title & meta description per product."
+  },
+  {
+    key: "product_content_fix",
+    label: "Product Description Fix (AI Copy)",
+    unit: "per product",
+    cost: CREDIT_COSTS.product_content_fix,
+    category: "Product SEO",
+    description: "Polishes, structures (H3/bullets), or rewrites rich HTML product description."
+  },
+  {
+    key: "product_seo_full",
+    label: "Full Product SEO + Description Bundle",
+    unit: "per product",
+    cost: CREDIT_COSTS.product_seo_full,
+    category: "Product SEO",
+    description: "Updates Title/Meta/Keyword (2 tok) + Full Product Description HTML (6 tok)."
+  },
+  {
+    key: "vision_alt",
+    label: "Vision Image ALT Text (Gemini Vision)",
+    unit: "per image",
+    cost: CREDIT_COSTS.vision_alt,
+    category: "Images & Speed",
+    description: "Visual AI inspects the actual photo to craft descriptive SEO ALT text."
+  },
+  {
+    key: "robots_txt_improvement",
+    label: "AI Robots.txt Optimization",
+    unit: "per run",
+    cost: CREDIT_COSTS.robots_txt_improvement,
+    category: "Technical SEO",
+    description: "Gemini-tailored robots.txt directives (best-practice template is Free)."
+  },
+  {
+    key: "audit_change",
+    label: "Gemini Diff Change Audit",
+    unit: "per audit",
+    cost: CREDIT_COSTS.audit_change,
+    category: "AI Chat & Audits",
+    description: "Before/After CTR & ranking risk evaluation before saving SEO edits."
+  },
+  {
+    key: "pagespeed_ai_fix",
+    label: "PageSpeed Core Web Vitals AI Plan",
+    unit: "per plan",
+    cost: CREDIT_COSTS.pagespeed_ai_fix,
+    category: "Images & Speed",
+    description: "Generates Liquid/script/LCP remediation steps from live Lighthouse telemetry."
+  },
+  {
+    key: "catalog_cannibalization",
+    label: "Keyword Cannibalization Resolver",
+    unit: "per run",
+    cost: CREDIT_COSTS.catalog_cannibalization,
+    category: "Technical SEO",
+    description: "Differentiates competing focus keywords across overlapping products."
+  },
+  {
+    key: "store_copilot",
+    label: "Executive Store-Wide Copilot Brief",
+    unit: "per brief",
+    cost: CREDIT_COSTS.store_copilot,
+    category: "AI Chat & Audits",
+    description: "Full-store prioritized roadmap combining SEO Audit & Search Console data."
+  },
+  {
+    key: "free_tools",
+    label: "Built-In Scans, Speed Test, Sitemap, 301s & Rollback",
+    unit: "unlimited",
+    cost: 0,
+    category: "Free Tools",
+    description: "SEO Audit scans, PageSpeed Insights tests, XML sitemap rebuilds, manual edits & rollbacks."
+  }
+]);
+const TOKEN_PACKAGES = Object.freeze([
+  {
+    id: "pack_100",
+    tokens: 100,
+    price: 5,
+    label: "100 Tokens",
+    tag: "Starter Top-Up",
+    pricePerToken: "$0.05 / token",
+    packName: "100 AI Tokens Package",
+    featured: false
+  },
+  {
+    id: "pack_250",
+    tokens: 250,
+    price: 10,
+    label: "250 Tokens",
+    tag: "Popular · Save 20%",
+    pricePerToken: "$0.04 / token",
+    packName: "250 AI Tokens Package",
+    featured: true
+  },
+  {
+    id: "pack_500",
+    tokens: 500,
+    price: 18,
+    label: "500 Tokens",
+    tag: "Best Value · Save 28%",
+    pricePerToken: "$0.036 / token",
+    packName: "500 AI Tokens Package",
+    featured: false
+  }
+]);
+function getTokenPackageById(packageId) {
+  const cleanId = String(packageId || "").trim();
+  return TOKEN_PACKAGES.find((pkg) => pkg.id === cleanId) || TOKEN_PACKAGES[0];
+}
+function resolvePackageFromShopifyPurchase(purchase, fallbackPackageId = "") {
+  var _a2;
+  if (!purchase) return null;
+  const purchaseName = String(purchase.name || "").trim();
+  const amount = Number((_a2 = purchase == null ? void 0 : purchase.price) == null ? void 0 : _a2.amount);
+  const byName = TOKEN_PACKAGES.find((pkg) => pkg.packName === purchaseName);
+  if (byName) return byName;
+  if (Number.isFinite(amount) && amount > 0) {
+    const byPrice = TOKEN_PACKAGES.find((pkg) => Math.abs(pkg.price - amount) < 0.01);
+    if (byPrice) return byPrice;
+  }
+  return getTokenPackageById(fallbackPackageId);
+}
+function resolveActionCreditCost(actionType, payload = {}) {
+  if (actionType === "product_seo_fix") {
+    return (payload == null ? void 0 : payload.mode) === "full" ? CREDIT_COSTS.product_seo_full : CREDIT_COSTS.product_seo_fix;
+  }
+  if (actionType === "product_content_fix") {
+    return (payload == null ? void 0 : payload.goal) === "expand" ? CREDIT_COSTS.product_content_expand : CREDIT_COSTS.product_content_fix;
+  }
+  if (actionType === "robots_txt_improvement" && (payload == null ? void 0 : payload.useAi) === false) {
+    return 0;
+  }
+  return CREDIT_COSTS[actionType] ?? 1;
+}
+function clampCount(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(num)));
+}
+function estimateChatActionTokens(action2 = {}, context = {}) {
+  const type = String((action2 == null ? void 0 : action2.type) || "").trim().toUpperCase();
+  const params = (action2 == null ? void 0 : action2.params) && typeof action2.params === "object" ? action2.params : {};
+  const superAccess = Boolean(context == null ? void 0 : context.superAccess);
+  const selectedProduct = (context == null ? void 0 : context.selectedProduct) || null;
+  let unitCost = 0;
+  let count = 1;
+  let unitLabel = "run";
+  let isVariable = false;
+  let scopeNote = "";
+  if (type === "AUTO_FIX_PRODUCTS") {
+    const ids = Array.isArray(params.productIds) ? params.productIds.filter(Boolean) : [];
+    count = ids.length > 0 ? ids.length : clampCount(params.maxProducts, 1, 5, 3);
+    unitCost = CREDIT_COSTS.product_seo_fix;
+    unitLabel = "product";
+    isVariable = ids.length === 0;
+    scopeNote = "2 tok per product updated (Title, Keyword, Handle & Meta)";
+  } else if (type === "FIX_PRODUCT_DESCRIPTION") {
+    const ids = Array.isArray(params.productIds) ? params.productIds.filter(Boolean) : [];
+    count = ids.length > 0 ? ids.length : clampCount(params.maxProducts, 1, 5, selectedProduct ? 1 : 3);
+    unitCost = CREDIT_COSTS.product_content_fix;
+    unitLabel = "product";
+    isVariable = ids.length === 0;
+    scopeNote = "6 tok per product description updated";
+  } else if (type === "COMPRESS_HEAVY_IMAGES") {
+    const explicitCount = Number((context == null ? void 0 : context.candidateImageCount) || 0);
+    count = explicitCount > 0 ? explicitCount : clampCount(params.maxImages, 1, 15, 8);
+    unitCost = CREDIT_COSTS.image_compression;
+    unitLabel = "image";
+    isVariable = true;
+    scopeNote = "1 tok per image compressed (skipped optimal images = 0 tok)";
+  } else if (type === "FIX_IMAGE_ALT") {
+    if (params.useAi) {
+      count = clampCount(params.maxImages, 1, 20, 5);
+      unitCost = CREDIT_COSTS.vision_alt;
+      unitLabel = "image";
+      isVariable = true;
+      scopeNote = "4 tok per image via Vision AI";
+    } else {
+      unitCost = 0;
+      count = 0;
+      scopeNote = "Heuristic SEO ALT fill is free";
+    }
+  } else if (type === "FIX_ROBOTS_TXT" && params.useAi) {
+    unitCost = CREDIT_COSTS.robots_txt_improvement;
+    count = 1;
+    unitLabel = "run";
+    scopeNote = "2 tok for Gemini robots.txt rules";
+  }
+  const standardTotal = Math.max(0, unitCost * Math.max(0, count));
+  const estimatedTokens = superAccess ? 0 : standardTotal;
+  const isBulk = count > 1 && unitCost > 0;
+  const pluralUnit = count === 1 ? unitLabel : `${unitLabel}s`;
+  let badgeLabel = "0 tok · Free";
+  if (superAccess && standardTotal > 0) {
+    badgeLabel = `Super Access (0 tok · std ${standardTotal})`;
+  } else if (standardTotal > 0) {
+    badgeLabel = isVariable ? `Up to ${standardTotal} tok (${count} × ${unitCost} tok/${unitLabel})` : `${standardTotal} tok (${count} ${pluralUnit} × ${unitCost} tok)`;
+  }
+  return {
+    type,
+    unitCost,
+    count,
+    unitLabel,
+    isBulk,
+    isVariable,
+    standardTotal,
+    estimatedTokens,
+    superAccess,
+    badgeLabel,
+    scopeNote
+  };
+}
+function calculateTokenEstimateSummary(counts = {}, availableCredits = 0, superAccess = false) {
+  const safe = (v) => Math.max(0, Math.min(1e5, Math.floor(Number(v) || 0)));
+  const items = [
+    {
+      key: "productSeoFixes",
+      label: "Title, Meta Title & Meta Description Fix",
+      qty: safe(counts.productSeoFixes),
+      rate: CREDIT_COSTS.product_seo_fix,
+      unit: "product"
+    },
+    {
+      key: "productDescriptionFixes",
+      label: "Product Description Fix (HTML Copy)",
+      qty: safe(counts.productDescriptionFixes),
+      rate: CREDIT_COSTS.product_content_fix,
+      unit: "product"
+    },
+    {
+      key: "imageCompressions",
+      label: "Image Compression (Sharp Optimizer)",
+      qty: safe(counts.imageCompressions),
+      rate: CREDIT_COSTS.image_compression,
+      unit: "image"
+    },
+    {
+      key: "visionAltImages",
+      label: "AI Vision Image ALT Tags",
+      qty: safe(counts.visionAltImages),
+      rate: CREDIT_COSTS.vision_alt,
+      unit: "image"
+    },
+    {
+      key: "chatMessages",
+      label: "AI Mode Chat Prompts",
+      qty: safe(counts.chatMessages),
+      rate: CREDIT_COSTS.ai_chat,
+      unit: "message"
+    },
+    {
+      key: "aiRobotsFixes",
+      label: "AI Robots.txt / Diff Audit",
+      qty: safe(counts.aiRobotsFixes),
+      rate: CREDIT_COSTS.robots_txt_improvement,
+      unit: "run"
+    },
+    {
+      key: "pagespeedAiPlans",
+      label: "PageSpeed AI Fix Plan",
+      qty: safe(counts.pagespeedAiPlans),
+      rate: CREDIT_COSTS.pagespeed_ai_fix,
+      unit: "plan"
+    },
+    {
+      key: "copilotBriefs",
+      label: "Executive Store Copilot Brief",
+      qty: safe(counts.copilotBriefs),
+      rate: CREDIT_COSTS.store_copilot,
+      unit: "brief"
+    }
+  ].map((item) => ({
+    ...item,
+    subtotal: item.qty * item.rate
+  }));
+  const standardTokens = items.reduce((sum, item) => sum + item.subtotal, 0);
+  const billableTokens = superAccess ? 0 : standardTokens;
+  const balance = Math.max(0, Number(availableCredits) || 0);
+  const shortfallTokens = superAccess ? 0 : Math.max(0, billableTokens - balance);
+  const coveredByBalance = superAccess || billableTokens <= balance;
+  const recommendedPackage = shortfallTokens > 0 ? TOKEN_PACKAGES.find((pkg) => pkg.tokens >= shortfallTokens) || TOKEN_PACKAGES[TOKEN_PACKAGES.length - 1] : null;
+  return {
+    items,
+    standardTokens,
+    billableTokens,
+    availableCredits: balance,
+    shortfallTokens,
+    coveredByBalance,
+    recommendedPackage,
+    superAccess: Boolean(superAccess)
+  };
+}
 const AI_FEATURES_ENABLED = true;
 const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
 const GEMINI_MODEL_CATALOG = Object.freeze([
@@ -605,6 +950,622 @@ const PRESET_GEMINI_MODEL_IDS = GEMINI_MODEL_CATALOG.map((model) => model.id);
 function formatGeminiModelName(modelId) {
   const match = GEMINI_MODEL_CATALOG.find((m) => m.id === modelId);
   return match ? match.label.replace(/\s*\(.*\)/, "") : String(modelId || DEFAULT_GEMINI_MODEL);
+}
+const IMAGE_SIZE_THRESHOLDS = Object.freeze({
+  OPTIMAL_MAX_BYTES: 200 * 1024,
+  // 200 KB target for fast storefront LCP
+  CRITICAL_BYTES: 600 * 1024,
+  // > 600 KB severely hurts mobile PageSpeed
+  MAX_SAFE_DIMENSION: 2048,
+  // Retina-sharp Shopify product display cap
+  CRITICAL_DIMENSION: 3e3,
+  PNG_CONVERT_RECOMMENDED_BYTES: 180 * 1024
+});
+const COMPRESSION_PRESETS = Object.freeze({
+  pagespeed_balanced: Object.freeze({
+    id: "pagespeed_balanced",
+    label: "PageSpeed Balanced (Recommended)",
+    badge: "Best LCP / Quality Ratio",
+    description: "Caps dimensions at 2048px, optimizes at quality 80 (MozJPEG / palette PNG / WebP), strips EXIF metadata, and converts bloated opaque PNGs.",
+    maxWidth: 2048,
+    maxHeight: 2048,
+    quality: 80,
+    format: "smart",
+    targetMaxKb: 0
+  }),
+  pagespeed_aggressive: Object.freeze({
+    id: "pagespeed_aggressive",
+    label: "Mobile LCP Speed (Smallest File)",
+    badge: "Max KB Savings",
+    description: "Caps dimensions at 1600px, converts to WebP quality 72, and enforces a <= 180 KB deterministic size ceiling when possible.",
+    maxWidth: 1600,
+    maxHeight: 1600,
+    quality: 72,
+    format: "webp",
+    targetMaxKb: 180
+  }),
+  lossless_safe: Object.freeze({
+    id: "lossless_safe",
+    label: "Studio Quality (Preserve Format)",
+    badge: "Near-Lossless",
+    description: "Keeps original format, caps dimensions at 2400px, uses quality 88, and strips unused camera EXIF/XMP metadata safely.",
+    maxWidth: 2400,
+    maxHeight: 2400,
+    quality: 88,
+    format: "preserve",
+    targetMaxKb: 0
+  }),
+  custom: Object.freeze({
+    id: "custom",
+    label: "Custom Fixed Rules",
+    badge: "Configurable",
+    description: "Configure exact fixed pixel limits, output format, encoder quality (45-95), and an optional max KB ceiling.",
+    maxWidth: 2048,
+    maxHeight: 2048,
+    quality: 80,
+    format: "smart",
+    targetMaxKb: 0
+  })
+});
+const VALID_OUTPUT_FORMATS = Object.freeze([
+  "smart",
+  "preserve",
+  "webp",
+  "jpeg",
+  "png"
+]);
+function clampInt$1(value, fallback, min, max) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(num)));
+}
+function normalizeCompressionOptions(raw = {}) {
+  const presetKey = Object.prototype.hasOwnProperty.call(
+    COMPRESSION_PRESETS,
+    String((raw == null ? void 0 : raw.preset) || "").trim()
+  ) ? String(raw.preset).trim() : "pagespeed_balanced";
+  const preset = COMPRESSION_PRESETS[presetKey];
+  if (presetKey !== "custom") {
+    return {
+      preset: preset.id,
+      maxWidth: preset.maxWidth,
+      maxHeight: preset.maxHeight,
+      quality: preset.quality,
+      format: preset.format,
+      targetMaxKb: preset.targetMaxKb
+    };
+  }
+  const maxWidth = clampInt$1(raw == null ? void 0 : raw.maxWidth, preset.maxWidth, 400, 4096);
+  const maxHeight = clampInt$1(raw == null ? void 0 : raw.maxHeight, maxWidth, 400, 4096);
+  const quality = clampInt$1(raw == null ? void 0 : raw.quality, preset.quality, 45, 95);
+  const rawFormat = String((raw == null ? void 0 : raw.format) || preset.format).trim().toLowerCase();
+  const format = VALID_OUTPUT_FORMATS.includes(rawFormat) ? rawFormat : preset.format;
+  const targetMaxKb = clampInt$1(raw == null ? void 0 : raw.targetMaxKb, 0, 0, 5e3);
+  return {
+    preset: "custom",
+    maxWidth,
+    maxHeight,
+    quality,
+    format,
+    targetMaxKb
+  };
+}
+function formatBytes$1(bytes) {
+  if (bytes === null || bytes === void 0 || !Number.isFinite(Number(bytes)) || Number(bytes) < 0) {
+    return "Unknown";
+  }
+  const value = Number(bytes);
+  if (value < 1024) return `${Math.round(value)} B`;
+  const kb = value / 1024;
+  if (kb < 1024) return `${kb >= 100 ? Math.round(kb) : kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(2)} MB`;
+}
+function inferImageFormatFromUrl(url = "", mimeType = "") {
+  const cleanMime = String(mimeType || "").trim().toLowerCase();
+  if (cleanMime.includes("webp")) return "webp";
+  if (cleanMime.includes("png")) return "png";
+  if (cleanMime.includes("jpeg") || cleanMime.includes("jpg")) return "jpeg";
+  if (cleanMime.includes("gif")) return "gif";
+  if (cleanMime.includes("avif")) return "avif";
+  if (cleanMime.includes("svg")) return "svg";
+  const cleanPath = String(url || "").split("?")[0].split("#")[0].toLowerCase();
+  const extMatch = cleanPath.match(/\.([a-z0-9]+)$/);
+  const ext = extMatch ? extMatch[1] : "";
+  if (ext === "jpg" || ext === "jpeg" || ext === "pjpeg") return "jpeg";
+  if (ext === "png") return "png";
+  if (ext === "webp") return "webp";
+  if (ext === "gif") return "gif";
+  if (ext === "avif") return "avif";
+  if (ext === "svg") return "svg";
+  if (ext === "bmp" || ext === "tiff" || ext === "tif") return ext;
+  return "unknown";
+}
+function analyzeImageSizeHealth({
+  width = 0,
+  height = 0,
+  fileSizeBytes = null,
+  format = "unknown"
+} = {}) {
+  const w = Math.max(0, Number(width || 0));
+  const h = Math.max(0, Number(height || 0));
+  const maxDimension = Math.max(w, h);
+  const hasSize = fileSizeBytes !== null && fileSizeBytes !== void 0 && Number.isFinite(Number(fileSizeBytes)) && Number(fileSizeBytes) > 0;
+  const bytes = hasSize ? Number(fileSizeBytes) : null;
+  const cleanFormat = String(format || "unknown").toLowerCase();
+  const criticalFile = Boolean(hasSize && bytes > IMAGE_SIZE_THRESHOLDS.CRITICAL_BYTES);
+  const heavyFile = Boolean(hasSize && bytes > IMAGE_SIZE_THRESHOLDS.OPTIMAL_MAX_BYTES);
+  const criticalDimensions = maxDimension > IMAGE_SIZE_THRESHOLDS.CRITICAL_DIMENSION;
+  const oversizedDimensions = maxDimension > IMAGE_SIZE_THRESHOLDS.MAX_SAFE_DIMENSION;
+  const bloatedPng = cleanFormat === "png" && (!hasSize || bytes > IMAGE_SIZE_THRESHOLDS.PNG_CONVERT_RECOMMENDED_BYTES);
+  const legacyBitmap = cleanFormat === "bmp" || cleanFormat === "tiff" || cleanFormat === "tif";
+  const reasons = [];
+  if (criticalFile) {
+    reasons.push(`Critical file weight (${formatBytes$1(bytes)} > 600 KB) slows PageSpeed LCP`);
+  } else if (heavyFile) {
+    reasons.push(`Heavy file (${formatBytes$1(bytes)} > 200 KB target)`);
+  }
+  if (criticalDimensions) {
+    reasons.push(`Very large resolution (${w}×${h}px > 3000px)`);
+  } else if (oversizedDimensions) {
+    reasons.push(`Oversized resolution (${w}×${h}px > 2048px display cap)`);
+  }
+  if (bloatedPng) {
+    reasons.push("Large PNG file — converting to WebP/MozJPEG cuts transfer bytes");
+  } else if (legacyBitmap) {
+    reasons.push(`Uncompressed ${cleanFormat.toUpperCase()} format should be converted to WebP/JPEG`);
+  }
+  let status = "optimal";
+  if (criticalFile || criticalDimensions || legacyBitmap) {
+    status = "critical";
+  } else if (heavyFile || oversizedDimensions || bloatedPng) {
+    status = "needs-optimization";
+  } else if (!hasSize && maxDimension === 0) {
+    status = "unchecked";
+  }
+  const needsOptimization = status === "critical" || status === "needs-optimization";
+  const estimatedSavablePercent = status === "critical" ? 55 : status === "needs-optimization" ? 35 : 0;
+  return {
+    status,
+    needsOptimization,
+    heavyFile,
+    criticalFile,
+    oversizedDimensions,
+    criticalDimensions,
+    bloatedPng,
+    legacyBitmap,
+    hasSize,
+    fileSizeBytes: bytes,
+    fileSizeLabel: formatBytes$1(bytes),
+    dimensionsLabel: w > 0 && h > 0 ? `${w}×${h}` : "Unknown",
+    maxDimension,
+    format: cleanFormat,
+    reasons,
+    estimatedSavablePercent
+  };
+}
+function summarizeCompressionRows(rows = []) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  let totalBytes = 0;
+  let knownSizeCount = 0;
+  let critical = 0;
+  let needsOptimization = 0;
+  let optimal = 0;
+  let unchecked = 0;
+  let oversizedCount = 0;
+  let heavyCount = 0;
+  for (const row of safeRows) {
+    const health = row.sizeHealth || analyzeImageSizeHealth({
+      width: row.width,
+      height: row.height,
+      fileSizeBytes: row.fileSizeBytes,
+      format: row.format
+    });
+    if (health.hasSize) {
+      knownSizeCount += 1;
+      totalBytes += health.fileSizeBytes;
+    }
+    if (health.oversizedDimensions) oversizedCount += 1;
+    if (health.heavyFile) heavyCount += 1;
+    if (health.status === "critical") {
+      critical += 1;
+      needsOptimization += 1;
+    } else if (health.status === "needs-optimization") {
+      needsOptimization += 1;
+    } else if (health.status === "optimal") {
+      optimal += 1;
+    } else {
+      unchecked += 1;
+    }
+  }
+  return {
+    total: safeRows.length,
+    totalBytes,
+    totalFormatted: knownSizeCount > 0 ? formatBytes$1(totalBytes) : "Unknown",
+    knownSizeCount,
+    critical,
+    warning: Math.max(0, needsOptimization - critical),
+    needsOptimization,
+    optimal,
+    unchecked,
+    oversizedCount,
+    heavyCount
+  };
+}
+const DEFAULT_PROBE_TIMEOUT_MS = 4500;
+const DEFAULT_DOWNLOAD_TIMEOUT_MS = 25e3;
+const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
+let cachedSharp = null;
+async function getSharp() {
+  if (cachedSharp) return cachedSharp;
+  try {
+    const mod = await import("sharp");
+    cachedSharp = mod.default || mod;
+    return cachedSharp;
+  } catch (error) {
+    throw new Error(
+      `Image compression engine (sharp) failed to initialize: ${(error == null ? void 0 : error.message) || "Module not available"}. Run npm install on the server.`
+    );
+  }
+}
+function parseContentRangeTotal(headerValue) {
+  const match = String(headerValue || "").match(/\/(\d+)\s*$/);
+  if (!match) return null;
+  const total = Number(match[1]);
+  return Number.isFinite(total) && total > 0 ? total : null;
+}
+async function probeImageMetadata(url, { timeoutMs = DEFAULT_PROBE_TIMEOUT_MS } = {}) {
+  const cleanUrl = String(url || "").trim();
+  const fallbackFormat = inferImageFormatFromUrl(cleanUrl);
+  if (!cleanUrl || !/^https?:\/\//i.test(cleanUrl)) {
+    return {
+      fileSizeBytes: null,
+      mimeType: "",
+      format: fallbackFormat
+    };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response = await fetch(cleanUrl, {
+      method: "HEAD",
+      signal: controller.signal
+    });
+    let mimeType = response.headers.get("content-type") || "";
+    const contentLengthHeader = response.headers.get("content-length");
+    let fileSizeBytes = contentLengthHeader !== null && /^\d+$/.test(contentLengthHeader.trim()) ? Number(contentLengthHeader.trim()) : null;
+    if ((!response.ok || fileSizeBytes === null || fileSizeBytes <= 0) && response.status !== 404) {
+      const rangeController = new AbortController();
+      const rangeTimer = setTimeout(() => rangeController.abort(), timeoutMs);
+      try {
+        response = await fetch(cleanUrl, {
+          method: "GET",
+          headers: { Range: "bytes=0-0" },
+          signal: rangeController.signal
+        });
+        mimeType = response.headers.get("content-type") || mimeType;
+        const rangeTotal = parseContentRangeTotal(response.headers.get("content-range"));
+        if (rangeTotal) {
+          fileSizeBytes = rangeTotal;
+        }
+        if (response.body && typeof response.body.cancel === "function") {
+          await response.body.cancel().catch(() => {
+          });
+        }
+      } finally {
+        clearTimeout(rangeTimer);
+      }
+    }
+    const format = inferImageFormatFromUrl(cleanUrl, mimeType);
+    return {
+      fileSizeBytes: Number.isFinite(fileSizeBytes) && fileSizeBytes > 0 ? fileSizeBytes : null,
+      mimeType: String(mimeType || "").split(";")[0].trim().toLowerCase(),
+      format
+    };
+  } catch {
+    return {
+      fileSizeBytes: null,
+      mimeType: "",
+      format: fallbackFormat
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function probeImageRowsBatch(rows = [], { concurrency = 6, timeoutMs = DEFAULT_PROBE_TIMEOUT_MS } = {}) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (!safeRows.length) return [];
+  const results = new Array(safeRows.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < safeRows.length) {
+      const idx = cursor;
+      cursor += 1;
+      const row = safeRows[idx];
+      const hasKnownBytes = row.fileSizeBytes !== null && row.fileSizeBytes !== void 0 && Number.isFinite(Number(row.fileSizeBytes)) && Number(row.fileSizeBytes) > 0;
+      const probed = hasKnownBytes ? {
+        fileSizeBytes: Number(row.fileSizeBytes),
+        mimeType: row.mimeType || "",
+        format: row.format || inferImageFormatFromUrl(row.imageUrl, row.mimeType)
+      } : await probeImageMetadata(row.imageUrl, { timeoutMs });
+      const format = probed.format || inferImageFormatFromUrl(row.imageUrl, probed.mimeType);
+      const sizeHealth = analyzeImageSizeHealth({
+        width: row.width,
+        height: row.height,
+        fileSizeBytes: probed.fileSizeBytes,
+        format
+      });
+      results[idx] = {
+        ...row,
+        fileSizeBytes: probed.fileSizeBytes,
+        fileSizeLabel: formatBytes$1(probed.fileSizeBytes),
+        mimeType: probed.mimeType || "",
+        format,
+        sizeHealth
+      };
+    }
+  }
+  const workerCount = Math.min(concurrency, safeRows.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+async function downloadImageBuffer(url, { timeoutMs = DEFAULT_DOWNLOAD_TIMEOUT_MS, maxBytes = MAX_DOWNLOAD_BYTES } = {}) {
+  const cleanUrl = String(url || "").trim();
+  if (!cleanUrl || !/^https?:\/\//i.test(cleanUrl)) {
+    throw new Error("Invalid product image URL.");
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(cleanUrl, {
+      method: "GET",
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch image (${response.status} ${response.statusText || ""}).`);
+    }
+    const headerLen = Number(response.headers.get("content-length") || 0);
+    if (headerLen > maxBytes) {
+      throw new Error(`Image exceeds ${formatBytes$1(maxBytes)} download safety limit.`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    if (!buffer.length) {
+      throw new Error("Downloaded image file was empty.");
+    }
+    if (buffer.length > maxBytes) {
+      throw new Error(`Image exceeds ${formatBytes$1(maxBytes)} size ceiling.`);
+    }
+    return {
+      buffer,
+      mimeType: String(response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase(),
+      originalBytes: buffer.length
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function resolveTargetFormat({ inputFormat = "jpeg", hasAlpha = false, requestedFormat = "smart" }) {
+  const cleanInput = String(inputFormat || "jpeg").toLowerCase();
+  const cleanRequested = String(requestedFormat || "smart").toLowerCase();
+  if (cleanRequested === "webp") return "webp";
+  if (cleanRequested === "jpeg") return "jpeg";
+  if (cleanRequested === "png") return "png";
+  if (cleanRequested === "preserve") {
+    if (cleanInput === "jpeg" || cleanInput === "jpg") return "jpeg";
+    if (cleanInput === "png") return "png";
+    if (cleanInput === "webp") return "webp";
+    return hasAlpha ? "png" : "jpeg";
+  }
+  if (cleanInput === "webp") return "webp";
+  if (cleanInput === "jpeg" || cleanInput === "jpg") return "jpeg";
+  return hasAlpha ? "webp" : "jpeg";
+}
+function formatToMimeAndExt(format) {
+  if (format === "webp") {
+    return { mimeType: "image/webp", extension: "webp" };
+  }
+  if (format === "png") {
+    return { mimeType: "image/png", extension: "png" };
+  }
+  return { mimeType: "image/jpeg", extension: "jpg" };
+}
+async function encodeSharpPipeline({
+  sharp,
+  inputBuffer,
+  metadata,
+  targetFormat,
+  maxWidth,
+  maxHeight,
+  quality
+}) {
+  let pipeline = sharp(inputBuffer, { failOn: "none" }).rotate();
+  if (metadata.space && !["srgb", "b-w"].includes(String(metadata.space).toLowerCase())) {
+    pipeline = pipeline.toColorspace("srgb");
+  }
+  pipeline = pipeline.resize({
+    width: maxWidth,
+    height: maxHeight,
+    fit: "inside",
+    withoutEnlargement: true
+  });
+  if (targetFormat === "jpeg") {
+    if (metadata.hasAlpha) {
+      pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
+    }
+    pipeline = pipeline.jpeg({
+      quality,
+      mozjpeg: true,
+      progressive: true
+    });
+  } else if (targetFormat === "webp") {
+    pipeline = pipeline.webp({
+      quality,
+      effort: 4
+    });
+  } else {
+    pipeline = pipeline.png({
+      compressionLevel: 9,
+      palette: true,
+      quality
+    });
+  }
+  const { data: data2, info } = await pipeline.toBuffer({ resolveWithObject: true });
+  return {
+    buffer: data2,
+    width: Number(info.width || metadata.width || 0),
+    height: Number(info.height || metadata.height || 0),
+    bytes: Number(data2.length)
+  };
+}
+async function compressImageBuffer(inputBuffer, rawOptions = {}) {
+  if (!Buffer.isBuffer(inputBuffer) || inputBuffer.length === 0) {
+    throw new Error("A non-empty image Buffer is required for compression.");
+  }
+  const sharp = await getSharp();
+  const options = normalizeCompressionOptions(rawOptions);
+  const metadata = await sharp(inputBuffer, { failOn: "none" }).metadata();
+  const originalFormat = String(metadata.format || "unknown").toLowerCase();
+  const originalWidth = Number(metadata.width || 0);
+  const originalHeight = Number(metadata.height || 0);
+  const originalBytes = inputBuffer.length;
+  if (originalFormat === "svg") {
+    return {
+      skipped: true,
+      reason: "Vector SVG asset is already resolution-independent.",
+      buffer: inputBuffer,
+      mimeType: "image/svg+xml",
+      extension: "svg",
+      format: "svg",
+      originalFormat,
+      originalBytes,
+      compressedBytes: originalBytes,
+      savedBytes: 0,
+      savedPercent: 0,
+      originalWidth,
+      originalHeight,
+      width: originalWidth,
+      height: originalHeight,
+      resized: false,
+      formatChanged: false,
+      qualityUsed: options.quality,
+      options
+    };
+  }
+  if (originalFormat === "gif" && Number(metadata.pages || 1) > 1) {
+    return {
+      skipped: true,
+      reason: "Animated GIF skipped to preserve animation frames.",
+      buffer: inputBuffer,
+      mimeType: "image/gif",
+      extension: "gif",
+      format: "gif",
+      originalFormat,
+      originalBytes,
+      compressedBytes: originalBytes,
+      savedBytes: 0,
+      savedPercent: 0,
+      originalWidth,
+      originalHeight,
+      width: originalWidth,
+      height: originalHeight,
+      resized: false,
+      formatChanged: false,
+      qualityUsed: options.quality,
+      options
+    };
+  }
+  const targetFormat = resolveTargetFormat({
+    inputFormat: originalFormat,
+    hasAlpha: Boolean(metadata.hasAlpha),
+    requestedFormat: options.format
+  });
+  let currentQuality = options.quality;
+  let encoded = await encodeSharpPipeline({
+    sharp,
+    inputBuffer,
+    metadata,
+    targetFormat,
+    maxWidth: options.maxWidth,
+    maxHeight: options.maxHeight,
+    quality: currentQuality
+  });
+  const targetMaxBytes = options.targetMaxKb > 0 ? options.targetMaxKb * 1024 : 0;
+  if (targetMaxBytes > 0 && encoded.bytes > targetMaxBytes) {
+    const qualitySteps = [
+      Math.max(55, currentQuality - 10),
+      Math.max(50, currentQuality - 20),
+      50
+    ].filter((q, idx, arr) => q < currentQuality && arr.indexOf(q) === idx);
+    for (const stepQuality of qualitySteps) {
+      const candidate = await encodeSharpPipeline({
+        sharp,
+        inputBuffer,
+        metadata,
+        targetFormat,
+        maxWidth: options.maxWidth,
+        maxHeight: options.maxHeight,
+        quality: stepQuality
+      });
+      if (candidate.bytes < encoded.bytes) {
+        encoded = candidate;
+        currentQuality = stepQuality;
+      }
+      if (encoded.bytes <= targetMaxBytes) {
+        break;
+      }
+    }
+  }
+  const resized = encoded.width < originalWidth || encoded.height < originalHeight;
+  const normalizedOriginal = originalFormat === "jpg" ? "jpeg" : originalFormat;
+  const formatChanged = targetFormat !== normalizedOriginal;
+  const savedBytes = Math.max(0, originalBytes - encoded.bytes);
+  const { mimeType, extension } = formatToMimeAndExt(targetFormat);
+  if (encoded.bytes >= originalBytes) {
+    return {
+      skipped: true,
+      reason: "Already optimal — re-encoding did not reduce byte size.",
+      buffer: inputBuffer,
+      mimeType,
+      extension,
+      format: normalizedOriginal,
+      originalFormat,
+      originalBytes,
+      compressedBytes: originalBytes,
+      savedBytes: 0,
+      savedPercent: 0,
+      originalWidth,
+      originalHeight,
+      width: originalWidth,
+      height: originalHeight,
+      resized: false,
+      formatChanged: false,
+      qualityUsed: currentQuality,
+      options
+    };
+  }
+  const savedPercent = originalBytes > 0 ? Math.round(savedBytes / originalBytes * 1e3) / 10 : 0;
+  return {
+    skipped: false,
+    reason: "",
+    buffer: encoded.buffer,
+    mimeType,
+    extension,
+    format: targetFormat,
+    originalFormat,
+    originalBytes,
+    compressedBytes: encoded.bytes,
+    savedBytes,
+    savedPercent,
+    originalWidth,
+    originalHeight,
+    width: encoded.width,
+    height: encoded.height,
+    resized,
+    formatChanged,
+    qualityUsed: currentQuality,
+    options
+  };
 }
 const DEFAULT_AI_SETTINGS = Object.freeze({
   provider: "gemini",
@@ -1417,6 +2378,457 @@ Return JSON only:
     }) : []
   };
 }
+const AI_CHAT_ACTION_TYPES = Object.freeze([
+  "RUN_FULL_SCAN",
+  "AUTO_FIX_PRODUCTS",
+  "FIX_PRODUCT_DESCRIPTION",
+  "UPDATE_SPECIFIC_PRODUCT",
+  "FIX_IMAGE_ALT",
+  "COMPRESS_HEAVY_IMAGES",
+  "FIX_ROBOTS_TXT",
+  "REGENERATE_SITEMAP",
+  "RUN_PAGESPEED_TEST",
+  "TOGGLE_AUTOPILOT",
+  "ROLLBACK_REVISION",
+  "OPEN_ROUTE"
+]);
+const ALLOWED_CHAT_ROUTES = /* @__PURE__ */ new Set([
+  "/app",
+  "/app/seo-audit",
+  "/app/products",
+  "/app/image-optimizer",
+  "/app/bulk-meta",
+  "/app/url-optimization",
+  "/app/pagespeed",
+  "/app/robots",
+  "/app/sitemap",
+  "/app/revisions",
+  "/app/settings",
+  "/app/billing"
+]);
+function clampInt(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(num)));
+}
+function sanitizeChatActionParams(type, rawParams = {}) {
+  const params = rawParams && typeof rawParams === "object" ? rawParams : {};
+  switch (type) {
+    case "AUTO_FIX_PRODUCTS": {
+      const productIds = Array.isArray(params.productIds) ? params.productIds.map((id) => cleanText(id)).filter(Boolean).slice(0, 5) : [];
+      return {
+        maxProducts: clampInt(params.maxProducts, 1, 5, 3),
+        productIds
+      };
+    }
+    case "FIX_PRODUCT_DESCRIPTION": {
+      const productIds = Array.isArray(params.productIds) ? params.productIds.map((id) => cleanText(id)).filter(Boolean).slice(0, 5) : [];
+      const goal = ["expand", "polish", "structure"].includes(String(params.goal || "")) ? String(params.goal) : "expand";
+      return {
+        maxProducts: clampInt(params.maxProducts, 1, 5, productIds.length || 1),
+        productIds,
+        goal
+      };
+    }
+    case "UPDATE_SPECIFIC_PRODUCT": {
+      const next = {
+        productId: cleanText(params.productId || params.id || "")
+      };
+      if (typeof params.title === "string" && params.title.trim()) {
+        next.title = cleanText(params.title);
+      }
+      if (typeof params.focusKeyword === "string" && params.focusKeyword.trim()) {
+        next.focusKeyword = cleanText(params.focusKeyword);
+      }
+      if (typeof params.metaTitle === "string" && params.metaTitle.trim()) {
+        next.metaTitle = cleanText(params.metaTitle);
+      }
+      if (typeof params.metaDescription === "string" && params.metaDescription.trim()) {
+        next.metaDescription = cleanText(params.metaDescription);
+      }
+      if (typeof params.handle === "string" && params.handle.trim()) {
+        next.handle = cleanText(params.handle).toLowerCase();
+      }
+      return next;
+    }
+    case "FIX_IMAGE_ALT": {
+      const productIds = Array.isArray(params.productIds) ? params.productIds.map((id) => cleanText(id)).filter(Boolean).slice(0, 10) : [];
+      return {
+        maxImages: clampInt(params.maxImages, 1, 20, 10),
+        productIds,
+        useAi: Boolean(params.useAi)
+      };
+    }
+    case "COMPRESS_HEAVY_IMAGES": {
+      const preset = ["balanced", "lossless", "high"].includes(String(params.preset || "")) ? String(params.preset) : "balanced";
+      const productIds = Array.isArray(params.productIds) ? params.productIds.map((id) => cleanText(id)).filter(Boolean).slice(0, 10) : [];
+      return {
+        preset,
+        maxImages: clampInt(params.maxImages, 1, 15, 8),
+        productIds
+      };
+    }
+    case "FIX_ROBOTS_TXT":
+      return {
+        useAi: Boolean(params.useAi),
+        customRules: typeof params.customRules === "string" ? params.customRules.trim().slice(0, 4e3) : ""
+      };
+    case "REGENERATE_SITEMAP":
+      return {
+        extraManualUrl: cleanText(params.extraManualUrl || "")
+      };
+    case "RUN_PAGESPEED_TEST": {
+      const strat = String(params.strategy || "").toLowerCase();
+      return {
+        strategy: strat === "desktop" ? "desktop" : strat === "both" ? "both" : "mobile",
+        targetUrl: cleanText(params.targetUrl || "")
+      };
+    }
+    case "TOGGLE_AUTOPILOT":
+      return {
+        enabled: params.enabled !== false,
+        optimizeMeta: params.optimizeMeta !== false,
+        optimizeAlt: params.optimizeAlt !== false
+      };
+    case "ROLLBACK_REVISION":
+      return {
+        revisionId: cleanText(params.revisionId || "")
+      };
+    case "OPEN_ROUTE": {
+      const route32 = cleanText(params.route || "/app/seo-audit");
+      return {
+        route: ALLOWED_CHAT_ROUTES.has(route32) ? route32 : "/app/seo-audit"
+      };
+    }
+    default:
+      return {};
+  }
+}
+function defaultActionLabel(type, params = {}) {
+  var _a2, _b;
+  switch (type) {
+    case "RUN_FULL_SCAN":
+      return "Run Full SEO Audit Scan";
+    case "AUTO_FIX_PRODUCTS":
+      return ((_a2 = params.productIds) == null ? void 0 : _a2.length) === 1 ? "AI Fix Product Meta & Title" : `AI Fix Top ${params.maxProducts || 3} Products`;
+    case "FIX_PRODUCT_DESCRIPTION":
+      return ((_b = params.productIds) == null ? void 0 : _b.length) === 1 ? "AI Fix Product Description" : `AI Fix ${params.maxProducts || 1} Description(s)`;
+    case "UPDATE_SPECIFIC_PRODUCT":
+      return "Save Custom Product SEO";
+    case "FIX_IMAGE_ALT":
+      return `Fix Missing Image ALT (${params.maxImages || 10})`;
+    case "COMPRESS_HEAVY_IMAGES":
+      return `Compress Images (${params.preset || "balanced"})`;
+    case "FIX_ROBOTS_TXT":
+      return params.customRules ? "Update Custom Robots.txt" : "Apply Best-Practice Robots.txt";
+    case "REGENERATE_SITEMAP":
+      return "Regenerate XML Sitemap";
+    case "RUN_PAGESPEED_TEST":
+      return `Run ${params.strategy === "desktop" ? "Desktop" : params.strategy === "both" ? "Mobile & Desktop" : "Mobile"} PageSpeed Test`;
+    case "TOGGLE_AUTOPILOT":
+      return params.enabled === false ? "Disable SEO Autopilot" : "Enable SEO Autopilot";
+    case "ROLLBACK_REVISION":
+      return "Rollback Last SEO Change";
+    case "OPEN_ROUTE":
+      return `Open ${params.route || "/app/seo-audit"}`;
+    default:
+      return "Run Action";
+  }
+}
+function defaultActionCostLabel(type, params = {}) {
+  if (type === "OPEN_ROUTE") return "Workspace";
+  const estimate = estimateChatActionTokens({ type, params });
+  if (estimate.estimatedTokens > 0) {
+    return estimate.badgeLabel;
+  }
+  return "Free · Instant";
+}
+function normalizeAiChatCopilotResponse(raw = {}) {
+  const input2 = raw && typeof raw === "object" ? raw : {};
+  const allowedSet = new Set(AI_CHAT_ACTION_TYPES);
+  const rawActions = Array.isArray(input2.suggestedActions) ? input2.suggestedActions : [];
+  const seenKeys = /* @__PURE__ */ new Set();
+  const suggestedActions = [];
+  for (let i = 0; i < rawActions.length && suggestedActions.length < 4; i += 1) {
+    const item = rawActions[i];
+    const type = String((item == null ? void 0 : item.type) || "").trim().toUpperCase();
+    if (!allowedSet.has(type)) continue;
+    const params = sanitizeChatActionParams(type, item == null ? void 0 : item.params);
+    if (type === "UPDATE_SPECIFIC_PRODUCT" && !params.productId) continue;
+    const dedupeKey = `${type}:${JSON.stringify(params)}`;
+    if (seenKeys.has(dedupeKey)) continue;
+    seenKeys.add(dedupeKey);
+    const tone = ["primary", "secondary", "warning"].includes(String((item == null ? void 0 : item.tone) || "")) ? String(item.tone) : suggestedActions.length === 0 ? "primary" : "secondary";
+    suggestedActions.push({
+      id: cleanText((item == null ? void 0 : item.id) || `act-${suggestedActions.length + 1}`) || `act-${suggestedActions.length + 1}`,
+      type,
+      label: cleanText((item == null ? void 0 : item.label) || defaultActionLabel(type, params)) || defaultActionLabel(type, params),
+      description: cleanText((item == null ? void 0 : item.description) || ""),
+      tone,
+      costLabel: defaultActionCostLabel(type, params),
+      params
+    });
+  }
+  const rawAutoId = cleanText(input2.autoRunActionId || "");
+  const autoAction = suggestedActions.find(
+    (action2) => action2.id === rawAutoId && action2.type !== "OPEN_ROUTE"
+  );
+  const quickReplies = Array.isArray(input2.quickReplies) ? input2.quickReplies.map((q) => cleanText(q)).filter(Boolean).slice(0, 4) : [];
+  return {
+    reply: String(input2.reply || "").trim().slice(0, 3500) || "I checked your current store telemetry. Select a recommended action below to fix issues directly.",
+    suggestedActions,
+    autoRunActionId: autoAction ? autoAction.id : "",
+    quickReplies
+  };
+}
+function buildAiChatFallbackResponse({
+  userMessage = "",
+  storeSnapshot = {},
+  selectedProduct = null,
+  reason = ""
+}) {
+  var _a2;
+  const lower = String(userMessage || "").toLowerCase();
+  const scan = (storeSnapshot == null ? void 0 : storeSnapshot.scan) || {};
+  const health = Number.isFinite(Number(scan.healthScore)) ? Number(scan.healthScore) : null;
+  const criticalCount = Number(scan.criticalCount || 0);
+  const missingAlt = Number(scan.missingAltCount || (storeSnapshot == null ? void 0 : storeSnapshot.missingAltImages) || 0);
+  const metaIssues = Number(scan.metaIssueProducts || 0);
+  const pageSpeedMobile = (_a2 = storeSnapshot == null ? void 0 : storeSnapshot.pageSpeed) == null ? void 0 : _a2.mobileScore;
+  const actions = [];
+  if (selectedProduct == null ? void 0 : selectedProduct.id) {
+    const cleanTitle = cleanText(selectedProduct.title || "Selected Product");
+    actions.push({
+      id: "act-selected-seo",
+      type: "AUTO_FIX_PRODUCTS",
+      label: `AI Fix "${cleanTitle}" (${CREDIT_COSTS.product_seo_fix} tok)`,
+      description: `Optimizes title, focus keyword, meta title, meta description & handle (${CREDIT_COSTS.product_seo_fix} tok).`,
+      tone: "primary",
+      params: { maxProducts: 1, productIds: [String(selectedProduct.id)] }
+    });
+    if (lower.includes("description") || lower.includes("copy") || lower.includes("content")) {
+      actions.push({
+        id: "act-selected-desc",
+        type: "FIX_PRODUCT_DESCRIPTION",
+        label: `AI Fix Description (${CREDIT_COSTS.product_content_fix} tok)`,
+        description: `Rewrites structured HTML product description with headings & bullets (${CREDIT_COSTS.product_content_fix} tok).`,
+        tone: "primary",
+        params: { maxProducts: 1, productIds: [String(selectedProduct.id)], goal: "expand" }
+      });
+    }
+  } else if (lower.includes("description") || lower.includes("copy") || lower.includes("content rewrite")) {
+    actions.push({
+      id: "act-desc-batch",
+      type: "FIX_PRODUCT_DESCRIPTION",
+      label: "AI Fix Top 3 Product Descriptions",
+      description: `Generates rich SEO product description HTML (${CREDIT_COSTS.product_content_fix} tok per product).`,
+      tone: "primary",
+      params: { maxProducts: 3, goal: "expand" }
+    });
+  }
+  if (lower.includes("rollback") || lower.includes("undo") || lower.includes("revert")) {
+    actions.push({
+      id: "act-rollback",
+      type: "ROLLBACK_REVISION",
+      label: "Rollback Last SEO Change",
+      description: "Restores the previous saved version of your last updated product in Shopify.",
+      tone: actions.length === 0 ? "primary" : "secondary",
+      params: {}
+    });
+  }
+  if (lower.includes("compress") || lower.includes("image size") || lower.includes("speed") || lower.includes("lcp") || lower.includes("heavy")) {
+    actions.push({
+      id: "act-compress",
+      type: "COMPRESS_HEAVY_IMAGES",
+      label: (selectedProduct == null ? void 0 : selectedProduct.id) ? "Compress Product Images" : "Compress Top 8 Heavy Images (Balanced)",
+      description: "Re-encodes oversized catalog images into sharp, lighter files with zero manual upload.",
+      tone: actions.length === 0 ? "primary" : "secondary",
+      params: (selectedProduct == null ? void 0 : selectedProduct.id) ? { preset: "balanced", maxImages: 8, productIds: [String(selectedProduct.id)] } : { preset: "balanced", maxImages: 8 }
+    });
+  }
+  if (lower.includes("alt") || missingAlt > 0) {
+    actions.push({
+      id: "act-alt",
+      type: "FIX_IMAGE_ALT",
+      label: (selectedProduct == null ? void 0 : selectedProduct.id) ? "Fix Selected Product ALT" : `Fix Up to 10 Missing ALT Tags`,
+      description: "Generates descriptive SEO ALT text for product images currently missing ALT.",
+      tone: actions.length === 0 ? "primary" : "secondary",
+      params: (selectedProduct == null ? void 0 : selectedProduct.id) ? { maxImages: 10, productIds: [String(selectedProduct.id)] } : { maxImages: 10 }
+    });
+  }
+  if (lower.includes("meta") || lower.includes("product") || lower.includes("title") || lower.includes("fix") || metaIssues > 0 || criticalCount > 0) {
+    actions.push({
+      id: "act-products",
+      type: "AUTO_FIX_PRODUCTS",
+      label: "AI Fix Top 3 Priority Products",
+      description: "Uses AI + audit guardrails to repair meta titles, descriptions, keywords, and handles.",
+      tone: actions.length === 0 ? "primary" : "secondary",
+      params: { maxProducts: 3 }
+    });
+  }
+  if (lower.includes("robots")) {
+    actions.push({
+      id: "act-robots",
+      type: "FIX_ROBOTS_TXT",
+      label: "Apply Best-Practice Robots.txt",
+      description: "Updates robots.txt draft rules safely and refreshes audit score.",
+      tone: "secondary",
+      params: { useAi: false }
+    });
+  }
+  if (lower.includes("sitemap")) {
+    actions.push({
+      id: "act-sitemap",
+      type: "REGENERATE_SITEMAP",
+      label: "Regenerate XML Sitemap",
+      description: "Rebuilds storefront sitemap.xml URLs from active products and pages.",
+      tone: "secondary",
+      params: {}
+    });
+  }
+  if (lower.includes("pagespeed") || lower.includes("lighthouse") || lower.includes("cwv")) {
+    actions.push({
+      id: "act-pagespeed",
+      type: "RUN_PAGESPEED_TEST",
+      label: "Run Live Mobile PageSpeed Test",
+      description: "Fetches live Google PageSpeed / Core Web Vitals metrics for your storefront.",
+      tone: "secondary",
+      params: { strategy: "mobile" }
+    });
+  }
+  if (!actions.length || lower.includes("scan") || lower.includes("audit")) {
+    actions.unshift({
+      id: "act-scan",
+      type: "RUN_FULL_SCAN",
+      label: "Run Full Store SEO Scan",
+      description: "Audits all catalog products, meta tags, URLs, and technical SEO health.",
+      tone: "primary",
+      params: {}
+    });
+  }
+  const normalized = normalizeAiChatCopilotResponse({
+    reply: [
+      reason ? `Live Gemini AI could not be reached right now (${cleanText(reason)}), so I inspected your local store snapshot instead.` : "",
+      health !== null ? `Current Store SEO Score: ${health}/100 (${criticalCount} critical issues, ${metaIssues} products needing meta/content improvements, ${missingAlt} images missing ALT${pageSpeedMobile != null ? `, Mobile PageSpeed: ${pageSpeedMobile}/100` : ""}).` : "No full SEO scan is cached yet. Start with a full store scan or select an instant fix action below.",
+      "Click any fix button below to apply it immediately inside your store."
+    ].filter(Boolean).join("\n\n"),
+    suggestedActions: actions,
+    quickReplies: [
+      "What are my top SEO issues right now?",
+      "Fix my top 3 products automatically",
+      "Compress heavy images for better PageSpeed",
+      "Fix missing image ALT text"
+    ]
+  });
+  return {
+    ...normalized,
+    fallbackUsed: true,
+    fallbackReason: cleanText(reason)
+  };
+}
+async function generateAiChatCopilotReply({
+  settings,
+  storeDomain,
+  userMessage,
+  chatHistory = [],
+  storeSnapshot = {},
+  selectedProduct = null,
+  catalogProducts = []
+}) {
+  const cleanMessage = String(userMessage || "").trim().slice(0, 1500);
+  if (!cleanMessage) {
+    return buildAiChatFallbackResponse({
+      userMessage: "",
+      storeSnapshot,
+      selectedProduct,
+      reason: "Empty prompt."
+    });
+  }
+  const effectiveSettings = resolveEffectiveAiConfig(settings);
+  if (!effectiveSettings.apiKey || effectiveSettings.provider !== "gemini") {
+    return buildAiChatFallbackResponse({
+      userMessage: cleanMessage,
+      storeSnapshot,
+      selectedProduct,
+      reason: "Gemini AI key is not configured in /superadmin."
+    });
+  }
+  const compactHistory = (Array.isArray(chatHistory) ? chatHistory : []).slice(-8).map((entry2) => {
+    var _a2;
+    return {
+      role: (entry2 == null ? void 0 : entry2.role) === "assistant" ? "assistant" : "user",
+      content: String((entry2 == null ? void 0 : entry2.content) || "").trim().slice(0, 400),
+      lastActionResult: ((_a2 = entry2 == null ? void 0 : entry2.actionResult) == null ? void 0 : _a2.summary) ? cleanText(entry2.actionResult.summary) : void 0
+    };
+  }).filter((entry2) => entry2.content);
+  const prompt = [
+    "You are EcomSEO AI Autopilot Copilot embedded inside a Shopify merchant's SEO & PageSpeed app.",
+    "The user is chatting in AI Mode and wants concrete analysis AND direct one-click fixes they can execute from this chatbox.",
+    "Always base numbers, product titles, and scores strictly on StoreSnapshot below. Never invent store metrics or claim you already edited Shopify unless the conversation history shows a completed actionResult.",
+    "",
+    "You may recommend up to 4 executable actions from this STRICT allowlist of `type` values:",
+    "- RUN_FULL_SCAN: params {} (runs live full catalog SEO audit; Free)",
+    `- AUTO_FIX_PRODUCTS: params { maxProducts: 1..5, productIds?: string[] } (uses AI + guardrails to optimize product title, focus keyword, meta title, meta description, and handle; ${CREDIT_COSTS.product_seo_fix} tokens per product)`,
+    `- FIX_PRODUCT_DESCRIPTION: params { maxProducts: 1..5, productIds?: string[], goal: 'expand'|'polish'|'structure' } (writes structured SEO HTML product description body copy for selected/top products; ${CREDIT_COSTS.product_content_fix} tokens per product)`,
+    "- UPDATE_SPECIFIC_PRODUCT: params { productId: string, title?: string, focusKeyword?: string, metaTitle?: string, metaDescription?: string, handle?: string } (directly writes exact merchant-requested SEO fields to a Shopify product + creates 301 redirect if handle changed; Free)",
+    `- FIX_IMAGE_ALT: params { maxImages: 1..20, productIds?: string[], useAi?: boolean } (writes SEO ALT text to Shopify product images; heuristic fill is Free, or useAi:true uses Vision AI at ${CREDIT_COSTS.vision_alt} tokens/image)`,
+    `- COMPRESS_HEAVY_IMAGES: params { preset: 'balanced'|'lossless'|'high', maxImages: 1..15, productIds?: string[] } (compresses unoptimized product images via Sharp for faster PageSpeed/LCP; ${CREDIT_COSTS.image_compression} token per compressed image, skipped images cost 0)`,
+    `- FIX_ROBOTS_TXT: params { useAi?: boolean, customRules?: string } (applies best-practice/custom rules [Free] or AI-optimized directives [${CREDIT_COSTS.robots_txt_improvement} tokens])`,
+    "- REGENERATE_SITEMAP: params { extraManualUrl?: string } (rebuilds XML sitemap, optionally adding a custom URL)",
+    "- RUN_PAGESPEED_TEST: params { strategy: 'mobile'|'desktop'|'both', targetUrl?: string } (runs live Google PageSpeed Insights diagnostic)",
+    "- TOGGLE_AUTOPILOT: params { enabled: boolean, optimizeMeta?: boolean, optimizeAlt?: boolean } (enables/disables automatic SEO optimization on new products)",
+    "- ROLLBACK_REVISION: params { revisionId?: string } (safely reverts the latest or specified product SEO change in Shopify)",
+    "- OPEN_ROUTE: params { route: '/app/seo-audit'|'/app/products'|'/app/image-optimizer'|'/app/bulk-meta'|'/app/url-optimization'|'/app/pagespeed'|'/app/robots'|'/app/sitemap'|'/app/revisions'|'/app/settings'|'/app/billing' }",
+    "",
+    "When the user says 'this product', 'selected product', or mentions a product name/handle, look up its exact `id` from `SelectedProduct` or `CatalogProducts` below and populate `productIds: [id]` or `productId: id`!",
+    "After actions finish, a live Before -> After report is automatically rendered in chat.",
+    "",
+    "Return ONLY valid JSON with this exact shape:",
+    JSON.stringify({
+      reply: "Clear, practical response explaining findings in plain merchant language (use concise bullet points when listing issues).",
+      suggestedActions: [
+        {
+          id: "act-1",
+          type: "FIX_IMAGE_ALT",
+          label: "Short button text (<=45 chars)",
+          description: "Exact effect in the merchant's store (<=140 chars)",
+          tone: "primary",
+          params: { maxImages: 10 }
+        }
+      ],
+      autoRunActionId: "Optional: exact id from suggestedActions ONLY if the user explicitly commanded to execute immediately (e.g., 'scan now', 'update this product now', 'fix missing alt now', 'compress my images now', 'enable autopilot'). Otherwise empty string.",
+      quickReplies: ["2-4 short follow-up prompts the user can click next"]
+    }),
+    "",
+    `Store Domain: ${cleanText(storeDomain)}`,
+    selectedProduct ? `SelectedProduct: ${JSON.stringify(selectedProduct)}` : "",
+    Array.isArray(catalogProducts) && catalogProducts.length ? `CatalogProducts: ${JSON.stringify(catalogProducts.slice(0, 25))}` : "",
+    `StoreSnapshot: ${JSON.stringify(storeSnapshot)}`,
+    `Recent Conversation: ${JSON.stringify(compactHistory)}`,
+    `Merchant Message: ${JSON.stringify(cleanMessage)}`
+  ].filter(Boolean).join("\n");
+  try {
+    const parsed = await requestGeminiJson({
+      model: effectiveSettings.model,
+      apiKey: effectiveSettings.apiKey,
+      prompt,
+      temperature: 0.3
+    });
+    const normalized = normalizeAiChatCopilotResponse(parsed);
+    return {
+      ...normalized,
+      fallbackUsed: false,
+      modelUsed: effectiveSettings.model
+    };
+  } catch (error) {
+    return buildAiChatFallbackResponse({
+      userMessage: cleanMessage,
+      storeSnapshot,
+      selectedProduct,
+      reason: (error == null ? void 0 : error.message) || "Gemini request failed."
+    });
+  }
+}
 const DEFAULT_ROBOTS = `User-agent: *
 Disallow: /cart
 Disallow: /search
@@ -1450,9 +2862,18 @@ const DEFAULT_PAGESPEED = {
   lastAiPlan: null,
   completedManualIds: []
 };
+const DEFAULT_IMAGE_COMPRESSION_STATS = {
+  totalImagesOptimized: 0,
+  totalBytesBefore: 0,
+  totalBytesAfter: 0,
+  totalBytesSaved: 0,
+  lastRunAt: null
+};
 const DEFAULT_STATE = {
   productSeo: {},
   imageOptimizerHistory: [],
+  imageCompressionHistory: [],
+  imageCompressionStats: { ...DEFAULT_IMAGE_COMPRESSION_STATS },
   lastScan: null,
   scoreHistory: [],
   robotsTxt: DEFAULT_ROBOTS,
@@ -1461,6 +2882,7 @@ const DEFAULT_STATE = {
   sitemapUrls: [],
   aiSettings: { ...DEFAULT_AI_SETTINGS },
   autopilot: { ...DEFAULT_AUTOPILOT },
+  aiChatHistory: [],
   gsc: { ...DEFAULT_GSC },
   pageSpeed: { ...DEFAULT_PAGESPEED }
 };
@@ -1471,11 +2893,23 @@ function parseState(jsonText) {
     const parsedAutopilot = parsed.autopilot && typeof parsed.autopilot === "object" ? parsed.autopilot : {};
     const parsedGsc = parsed.gsc && typeof parsed.gsc === "object" ? parsed.gsc : {};
     const parsedPageSpeed = parsed.pageSpeed && typeof parsed.pageSpeed === "object" ? parsed.pageSpeed : {};
+    const parsedCompStats = parsed.imageCompressionStats && typeof parsed.imageCompressionStats === "object" ? parsed.imageCompressionStats : {};
     return {
       ...DEFAULT_STATE,
+      aiChatHistory: Array.isArray(parsed.aiChatHistory) ? parsed.aiChatHistory.slice(-30) : [],
       ...parsed,
       productSeo: parsed.productSeo || {},
       imageOptimizerHistory: Array.isArray(parsed.imageOptimizerHistory) ? parsed.imageOptimizerHistory : [],
+      imageCompressionHistory: Array.isArray(parsed.imageCompressionHistory) ? parsed.imageCompressionHistory : [],
+      imageCompressionStats: {
+        ...DEFAULT_IMAGE_COMPRESSION_STATS,
+        ...parsedCompStats,
+        totalImagesOptimized: Number(parsedCompStats.totalImagesOptimized || 0),
+        totalBytesBefore: Number(parsedCompStats.totalBytesBefore || 0),
+        totalBytesAfter: Number(parsedCompStats.totalBytesAfter || 0),
+        totalBytesSaved: Number(parsedCompStats.totalBytesSaved || 0),
+        lastRunAt: parsedCompStats.lastRunAt || null
+      },
       scoreHistory: Array.isArray(parsed.scoreHistory) ? parsed.scoreHistory : [],
       sitemapManualUrls: Array.isArray(parsed.sitemapManualUrls) ? parsed.sitemapManualUrls : [],
       sitemapUrls: Array.isArray(parsed.sitemapUrls) ? parsed.sitemapUrls : [],
@@ -1554,81 +2988,6 @@ async function updateAppState(shop, mutator) {
       return next;
     });
   });
-}
-const PLAN_ALLOWANCES = Object.freeze({
-  FREE: 15,
-  PRO: 50
-});
-const CREDIT_COSTS = Object.freeze({
-  meta_fix: 1,
-  product_content_fix: 2,
-  product_content_expand: 3,
-  robots_txt_improvement: 2,
-  product_seo_minor: 2,
-  product_seo_fix: 3,
-  audit_change: 2,
-  vision_alt: 4,
-  pagespeed_ai_fix: 4,
-  catalog_cannibalization: 6,
-  store_copilot: 10
-});
-const TOKEN_PACKAGES = Object.freeze([
-  {
-    id: "pack_100",
-    tokens: 100,
-    price: 5,
-    label: "100 Tokens",
-    tag: "Starter Top-Up",
-    pricePerToken: "$0.05 / token",
-    packName: "100 AI Tokens Package",
-    featured: false
-  },
-  {
-    id: "pack_250",
-    tokens: 250,
-    price: 10,
-    label: "250 Tokens",
-    tag: "Popular · Save 20%",
-    pricePerToken: "$0.04 / token",
-    packName: "250 AI Tokens Package",
-    featured: true
-  },
-  {
-    id: "pack_500",
-    tokens: 500,
-    price: 18,
-    label: "500 Tokens",
-    tag: "Best Value · Save 28%",
-    pricePerToken: "$0.036 / token",
-    packName: "500 AI Tokens Package",
-    featured: false
-  }
-]);
-function getTokenPackageById(packageId) {
-  const cleanId = String(packageId || "").trim();
-  return TOKEN_PACKAGES.find((pkg) => pkg.id === cleanId) || TOKEN_PACKAGES[0];
-}
-function resolvePackageFromShopifyPurchase(purchase, fallbackPackageId = "") {
-  var _a2;
-  if (!purchase) return null;
-  const purchaseName = String(purchase.name || "").trim();
-  const amount = Number((_a2 = purchase == null ? void 0 : purchase.price) == null ? void 0 : _a2.amount);
-  const byName = TOKEN_PACKAGES.find((pkg) => pkg.packName === purchaseName);
-  if (byName) return byName;
-  if (Number.isFinite(amount) && amount > 0) {
-    const byPrice = TOKEN_PACKAGES.find((pkg) => Math.abs(pkg.price - amount) < 0.01);
-    if (byPrice) return byPrice;
-  }
-  return getTokenPackageById(fallbackPackageId);
-}
-function resolveActionCreditCost(actionType, payload = {}) {
-  if (actionType === "product_seo_fix") {
-    return (payload == null ? void 0 : payload.mode) === "minor" ? CREDIT_COSTS.product_seo_minor : CREDIT_COSTS.product_seo_fix;
-  }
-  if (actionType === "product_content_fix") {
-    return (payload == null ? void 0 : payload.goal) === "expand" ? CREDIT_COSTS.product_content_expand : CREDIT_COSTS.product_content_fix;
-  }
-  return CREDIT_COSTS[actionType] ?? 1;
 }
 function normalizeShop(shop) {
   return String(shop || "").trim().toLowerCase();
@@ -2796,7 +4155,8 @@ async function fetchProductImages({
       altText: String(image.alt || ""),
       imageUrl: String(image.src || ""),
       width: Number(image.width || 0),
-      height: Number(image.height || 0)
+      height: Number(image.height || 0),
+      variantIds: Array.isArray(image.variant_ids) ? image.variant_ids.map(String) : []
     }));
   });
   return {
@@ -2986,6 +4346,526 @@ async function createUrlRedirect({
     console.warn(`Failed to create 301 redirect for ${cleanPath}:`, error == null ? void 0 : error.message);
     return null;
   }
+}
+function toMediaImageGid(mediaId) {
+  const clean = String(mediaId || "").trim();
+  if (!clean) return "";
+  return clean.startsWith("gid://") ? clean : `gid://shopify/MediaImage/${clean}`;
+}
+function toVariantGid(variantId) {
+  const clean = String(variantId || "").trim();
+  if (!clean) return "";
+  return clean.startsWith("gid://") ? clean : `gid://shopify/ProductVariant/${clean}`;
+}
+async function fetchProductMediaSnapshot({
+  storeDomain,
+  token,
+  apiVersion,
+  productId
+}) {
+  var _a2, _b;
+  const data2 = await shopifyGraphqlRequest({
+    storeDomain,
+    token,
+    apiVersion,
+    query: `
+      query ProductMediaSnapshot($id: ID!) {
+        product(id: $id) {
+          id
+          media(first: 100) {
+            nodes {
+              id
+              alt
+              mediaContentType
+              status
+              ... on MediaImage {
+                image {
+                  id
+                  url
+                  width
+                  height
+                }
+              }
+            }
+          }
+          variants(first: 100) {
+            nodes {
+              id
+              media(first: 5) {
+                nodes {
+                  id
+                }
+              }
+              image {
+                id
+              }
+            }
+          }
+        }
+      }
+    `,
+    variables: { id: toProductGid(productId) }
+  });
+  const product = data2 == null ? void 0 : data2.product;
+  if (!(product == null ? void 0 : product.id)) {
+    throw new Error(`Shopify product ${productId} was not found.`);
+  }
+  return {
+    productGid: product.id,
+    mediaNodes: Array.isArray((_a2 = product.media) == null ? void 0 : _a2.nodes) ? product.media.nodes : [],
+    variantNodes: Array.isArray((_b = product.variants) == null ? void 0 : _b.nodes) ? product.variants.nodes : []
+  };
+}
+async function uploadBufferToStagedTarget({
+  stagedTarget,
+  buffer,
+  filename,
+  mimeType
+}) {
+  const targetUrl = String((stagedTarget == null ? void 0 : stagedTarget.url) || "").trim();
+  if (!targetUrl) {
+    throw new Error("Shopify did not return a staged upload URL.");
+  }
+  const parameters = Array.isArray(stagedTarget.parameters) ? stagedTarget.parameters : [];
+  const looksLikeMultipartPost = parameters.length > 0 && !targetUrl.includes("X-Goog-Signature") && !targetUrl.includes("X-Amz-Signature");
+  if (looksLikeMultipartPost) {
+    const formData = new FormData();
+    for (const param of parameters) {
+      if (param == null ? void 0 : param.name) {
+        formData.append(param.name, String(param.value ?? ""));
+      }
+    }
+    formData.append("file", new Blob([buffer], { type: mimeType }), filename);
+    const uploadRes2 = await fetch(targetUrl, {
+      method: "POST",
+      body: formData
+    });
+    if (!uploadRes2.ok) {
+      const errText = await uploadRes2.text().catch(() => "");
+      throw new Error(
+        `Staged multipart upload failed (${uploadRes2.status}): ${errText.slice(0, 180) || "Upload rejected"}`
+      );
+    }
+    return;
+  }
+  const headers2 = {
+    "Content-Type": mimeType
+  };
+  for (const param of parameters) {
+    if ((param == null ? void 0 : param.name) && !/^host$/i.test(param.name)) {
+      headers2[param.name] = String(param.value ?? "");
+    }
+  }
+  const uploadRes = await fetch(targetUrl, {
+    method: "PUT",
+    headers: headers2,
+    body: buffer
+  });
+  if (!uploadRes.ok) {
+    const errText = await uploadRes.text().catch(() => "");
+    throw new Error(
+      `Staged PUT upload failed (${uploadRes.status}): ${errText.slice(0, 180) || "Upload rejected"}`
+    );
+  }
+}
+async function pollMediaReady({
+  storeDomain,
+  token,
+  apiVersion,
+  mediaGid,
+  maxAttempts = 18,
+  delayMs = 700
+}) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const data2 = await shopifyGraphqlRequest({
+      storeDomain,
+      token,
+      apiVersion,
+      query: `
+        query PollMediaImage($id: ID!) {
+          node(id: $id) {
+            id
+            ... on MediaImage {
+              status
+              alt
+              image {
+                id
+                url
+                width
+                height
+              }
+              mediaErrors {
+                code
+                message
+              }
+            }
+          }
+        }
+      `,
+      variables: { id: mediaGid }
+    });
+    const node = data2 == null ? void 0 : data2.node;
+    if (!node) {
+      throw new Error("Uploaded Shopify media record disappeared during processing.");
+    }
+    if (node.status === "READY") {
+      return node;
+    }
+    if (node.status === "FAILED") {
+      const reason = (node.mediaErrors || []).map((e) => e.message).filter(Boolean).join(", ");
+      throw new Error(`Shopify failed processing compressed image: ${reason || "Media processing error"}`);
+    }
+    if (attempt < maxAttempts - 1) {
+      await sleep(delayMs);
+    }
+  }
+  throw new Error("Timed out waiting for Shopify CDN to finish processing compressed image.");
+}
+async function deleteProductMediaNodes({
+  storeDomain,
+  token,
+  apiVersion,
+  productGid,
+  mediaIds
+}) {
+  var _a2;
+  const validIds = (Array.isArray(mediaIds) ? mediaIds : []).filter(Boolean);
+  if (!validIds.length) return;
+  const data2 = await shopifyGraphqlRequest({
+    storeDomain,
+    token,
+    apiVersion,
+    query: `
+      mutation DeleteProductMedia($productId: ID!, $mediaIds: [ID!]!) {
+        productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
+          deletedMediaIds
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    variables: {
+      productId: productGid,
+      mediaIds: validIds
+    }
+  });
+  const userErrors = ((_a2 = data2 == null ? void 0 : data2.productDeleteMedia) == null ? void 0 : _a2.userErrors) || [];
+  if (userErrors.length) {
+    throw new Error(userErrors.map((e) => e.message).join(", "));
+  }
+}
+async function replaceProductImageViaRestFallback({
+  storeDomain,
+  token,
+  apiVersion,
+  productId,
+  oldImageId,
+  buffer,
+  filename,
+  altText,
+  position,
+  variantIds
+}) {
+  const numericVariants = (Array.isArray(variantIds) ? variantIds : []).map((id) => Number(fromProductGid(id))).filter((id) => Number.isFinite(id) && id > 0);
+  const payload = {
+    image: {
+      attachment: buffer.toString("base64"),
+      filename,
+      alt: altText,
+      position,
+      ...numericVariants.length ? { variant_ids: numericVariants } : {}
+    }
+  };
+  const { data: created } = await shopifyRestRequest({
+    storeDomain,
+    token,
+    apiVersion,
+    path: `/products/${String(productId)}/images.json`,
+    method: "POST",
+    body: payload
+  });
+  const newImg = created == null ? void 0 : created.image;
+  if (!(newImg == null ? void 0 : newImg.id)) {
+    throw new Error("Shopify REST image replacement did not return the new uploaded image.");
+  }
+  if (oldImageId && String(oldImageId) !== String(newImg.id)) {
+    await shopifyRestRequest({
+      storeDomain,
+      token,
+      apiVersion,
+      path: `/products/${String(productId)}/images/${String(oldImageId)}.json`,
+      method: "DELETE"
+    });
+  }
+  return {
+    productId: String(productId),
+    oldImageId: String(oldImageId || ""),
+    oldMediaId: "",
+    newMediaId: "",
+    newImageId: String(newImg.id),
+    newImageUrl: String(newImg.src || ""),
+    width: Number(newImg.width || 0),
+    height: Number(newImg.height || 0),
+    altText: String(newImg.alt || altText),
+    position: Number(newImg.position || position),
+    variantIds: Array.isArray(newImg.variant_ids) ? newImg.variant_ids.map(String) : numericVariants.map(String)
+  };
+}
+async function replaceProductImageWithCompressed({
+  storeDomain,
+  token,
+  apiVersion,
+  productId,
+  imageId,
+  mediaId = "",
+  buffer,
+  filename,
+  mimeType,
+  altText = "",
+  position = 1,
+  variantIds = []
+}) {
+  var _a2, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o;
+  const productGid = toProductGid(productId);
+  const snapshot = await fetchProductMediaSnapshot({
+    storeDomain,
+    token,
+    apiVersion,
+    productId
+  });
+  const cleanImageId = String(imageId || "").trim();
+  const cleanMediaGid = mediaId ? toMediaImageGid(mediaId) : "";
+  const oldIndex = snapshot.mediaNodes.findIndex(
+    (node) => {
+      var _a3;
+      return cleanMediaGid && node.id === cleanMediaGid || cleanImageId && (fromProductGid((_a3 = node.image) == null ? void 0 : _a3.id) === cleanImageId || fromProductGid(node.id) === cleanImageId);
+    }
+  );
+  const oldMediaNode = oldIndex >= 0 ? snapshot.mediaNodes[oldIndex] : null;
+  if (!oldMediaNode) {
+    throw new Error(`Original product image ${imageId || mediaId} was not found on product ${productId}.`);
+  }
+  const resolvedAlt = String(altText || oldMediaNode.alt || "").trim();
+  const targetPosition = oldIndex >= 0 ? oldIndex : Math.max(0, Number(position || 1) - 1);
+  const matchedVariantGids = /* @__PURE__ */ new Set();
+  for (const v of snapshot.variantNodes) {
+    const usesOldMedia = (((_a2 = v.media) == null ? void 0 : _a2.nodes) || []).some((m) => m.id === oldMediaNode.id);
+    const usesOldImage = cleanImageId && fromProductGid((_b = v.image) == null ? void 0 : _b.id) === cleanImageId;
+    if (usesOldMedia || usesOldImage) {
+      matchedVariantGids.add(v.id);
+    }
+  }
+  for (const vid of Array.isArray(variantIds) ? variantIds : []) {
+    const gid = toVariantGid(vid);
+    if (gid) matchedVariantGids.add(gid);
+  }
+  let stagedData;
+  try {
+    stagedData = await shopifyGraphqlRequest({
+      storeDomain,
+      token,
+      apiVersion,
+      query: `
+        mutation StagedImageUpload($input: [StagedUploadInput!]!) {
+          stagedUploadsCreate(input: $input) {
+            stagedTargets {
+              url
+              resourceUrl
+              parameters {
+                name
+                value
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      variables: {
+        input: [
+          {
+            filename,
+            mimeType,
+            resource: "IMAGE",
+            httpMethod: "POST",
+            fileSize: String(buffer.length)
+          }
+        ]
+      }
+    });
+  } catch (stagedError) {
+    if (/access\s*denied/i.test(String((stagedError == null ? void 0 : stagedError.message) || "")) && cleanImageId) {
+      return replaceProductImageViaRestFallback({
+        storeDomain,
+        token,
+        apiVersion,
+        productId,
+        oldImageId: cleanImageId,
+        buffer,
+        filename,
+        altText: resolvedAlt,
+        position: targetPosition + 1,
+        variantIds: Array.from(matchedVariantGids)
+      });
+    }
+    throw stagedError;
+  }
+  const stagedErrors = ((_c = stagedData == null ? void 0 : stagedData.stagedUploadsCreate) == null ? void 0 : _c.userErrors) || [];
+  if (stagedErrors.length) {
+    throw new Error(stagedErrors.map((e) => e.message).join(", "));
+  }
+  const stagedTarget = (_e = (_d = stagedData == null ? void 0 : stagedData.stagedUploadsCreate) == null ? void 0 : _d.stagedTargets) == null ? void 0 : _e[0];
+  if (!(stagedTarget == null ? void 0 : stagedTarget.resourceUrl)) {
+    throw new Error("Shopify did not return a staged resourceUrl for compressed image.");
+  }
+  await uploadBufferToStagedTarget({
+    stagedTarget,
+    buffer,
+    filename,
+    mimeType
+  });
+  const createMediaData = await shopifyGraphqlRequest({
+    storeDomain,
+    token,
+    apiVersion,
+    query: `
+      mutation AttachCompressedProductMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+        productCreateMedia(productId: $productId, media: $media) {
+          media {
+            id
+            status
+            mediaContentType
+          }
+          mediaUserErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    variables: {
+      productId: productGid,
+      media: [
+        {
+          mediaContentType: "IMAGE",
+          originalSource: stagedTarget.resourceUrl,
+          alt: resolvedAlt
+        }
+      ]
+    }
+  });
+  const mediaErrors = ((_f = createMediaData == null ? void 0 : createMediaData.productCreateMedia) == null ? void 0 : _f.mediaUserErrors) || [];
+  if (mediaErrors.length) {
+    throw new Error(mediaErrors.map((e) => e.message).join(", "));
+  }
+  const createdMediaId = (_i = (_h = (_g = createMediaData == null ? void 0 : createMediaData.productCreateMedia) == null ? void 0 : _g.media) == null ? void 0 : _h[0]) == null ? void 0 : _i.id;
+  if (!createdMediaId) {
+    throw new Error("Shopify did not return a created MediaImage ID.");
+  }
+  let readyMedia = null;
+  try {
+    readyMedia = await pollMediaReady({
+      storeDomain,
+      token,
+      apiVersion,
+      mediaGid: createdMediaId
+    });
+    if (matchedVariantGids.size > 0) {
+      const variantsInput = Array.from(matchedVariantGids).map((variantId) => ({
+        id: variantId,
+        mediaId: createdMediaId
+      }));
+      for (let retry = 0; retry < 2; retry += 1) {
+        const variantRes = await shopifyGraphqlRequest({
+          storeDomain,
+          token,
+          apiVersion,
+          query: `
+            mutation RebindVariantMedia($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+              productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+                userErrors {
+                  code
+                  field
+                  message
+                }
+              }
+            }
+          `,
+          variables: {
+            productId: productGid,
+            variants: variantsInput
+          }
+        });
+        const vErrors = ((_j = variantRes == null ? void 0 : variantRes.productVariantsBulkUpdate) == null ? void 0 : _j.userErrors) || [];
+        if (!vErrors.length) break;
+        const isPropagationLag = vErrors.some((e) => e.code === "MUST_BE_FOR_THIS_PRODUCT");
+        if (isPropagationLag && retry === 0) {
+          await sleep(600);
+          continue;
+        }
+        throw new Error(vErrors.map((e) => e.message).join(", "));
+      }
+    }
+    if (targetPosition >= 0) {
+      const reorderRes = await shopifyGraphqlRequest({
+        storeDomain,
+        token,
+        apiVersion,
+        query: `
+          mutation ReorderCompressedMedia($productId: ID!, $moves: [MoveInput!]!) {
+            productReorderMedia(productId: $productId, moves: $moves) {
+              userErrors {
+                field
+                message
+              }
+            }
+          }
+        `,
+        variables: {
+          productId: productGid,
+          moves: [{ id: createdMediaId, newPosition: String(targetPosition) }]
+        }
+      });
+      const rErrors = ((_k = reorderRes == null ? void 0 : reorderRes.productReorderMedia) == null ? void 0 : _k.userErrors) || [];
+      if (rErrors.length) {
+        console.warn("Media reorder warning:", rErrors);
+      }
+    }
+  } catch (error) {
+    await deleteProductMediaNodes({
+      storeDomain,
+      token,
+      apiVersion,
+      productGid,
+      mediaIds: [createdMediaId]
+    }).catch(() => {
+    });
+    throw error;
+  }
+  await deleteProductMediaNodes({
+    storeDomain,
+    token,
+    apiVersion,
+    productGid,
+    mediaIds: [oldMediaNode.id]
+  });
+  return {
+    productId: String(productId),
+    oldImageId: cleanImageId,
+    oldMediaId: oldMediaNode.id,
+    newMediaId: createdMediaId,
+    newImageId: fromProductGid(((_l = readyMedia == null ? void 0 : readyMedia.image) == null ? void 0 : _l.id) || createdMediaId),
+    newImageUrl: String(((_m = readyMedia == null ? void 0 : readyMedia.image) == null ? void 0 : _m.url) || ""),
+    width: Number(((_n = readyMedia == null ? void 0 : readyMedia.image) == null ? void 0 : _n.width) || 0),
+    height: Number(((_o = readyMedia == null ? void 0 : readyMedia.image) == null ? void 0 : _o.height) || 0),
+    altText: String((readyMedia == null ? void 0 : readyMedia.alt) || resolvedAlt),
+    position: targetPosition + 1,
+    variantIds: Array.from(matchedVariantGids).map(fromProductGid)
+  };
 }
 async function persistAuditResult({ shop, audit }) {
   var _a2, _b, _c, _d;
@@ -3623,6 +5503,87 @@ async function loadProductsPage({
     appState
   };
 }
+function normalizeImageCompressionFilter(value) {
+  const clean = String(value || "all").trim().toLowerCase();
+  if (clean === "needs-optimization" || clean === "critical" || clean === "optimal") {
+    return clean;
+  }
+  return "all";
+}
+function buildSafeImageFilename({ productHandle, productTitle, position, extension }) {
+  const baseRaw = String(productHandle || productTitle || "product-image").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+  const base = baseRaw || "product-image";
+  const pos = Math.max(1, Number(position || 1));
+  const ext = String(extension || "jpg").replace(/[^a-z0-9]/gi, "").toLowerCase() || "jpg";
+  return `${base}-v${pos}-opt.${ext}`;
+}
+async function appendImageCompressionHistory({
+  shop,
+  status,
+  preset,
+  attempted = 0,
+  compressed = 0,
+  skipped = 0,
+  failed = 0,
+  bytesBefore = 0,
+  bytesAfter = 0,
+  bytesSaved = 0,
+  note = ""
+}) {
+  const entry2 = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    status: status === "failed" ? "failed" : "success",
+    preset: String(preset || "pagespeed_balanced"),
+    attempted: Number(attempted || 0),
+    compressed: Number(compressed || 0),
+    skipped: Number(skipped || 0),
+    failed: Number(failed || 0),
+    bytesBefore: Number(bytesBefore || 0),
+    bytesAfter: Number(bytesAfter || 0),
+    bytesSaved: Number(bytesSaved || 0),
+    note: String(note || "")
+  };
+  if (!shop) {
+    return {
+      entry: entry2,
+      history: [entry2],
+      stats: {
+        totalImagesOptimized: compressed,
+        totalBytesBefore: bytesBefore,
+        totalBytesAfter: bytesAfter,
+        totalBytesSaved: bytesSaved,
+        lastRunAt: entry2.createdAt
+      },
+      lastRun: entry2
+    };
+  }
+  const next = await updateAppState(shop, (current) => {
+    const prevStats = current.imageCompressionStats || {};
+    const nextStats = {
+      totalImagesOptimized: Number(prevStats.totalImagesOptimized || 0) + Number(compressed || 0),
+      totalBytesBefore: Number(prevStats.totalBytesBefore || 0) + Number(bytesBefore || 0),
+      totalBytesAfter: Number(prevStats.totalBytesAfter || 0) + Number(bytesAfter || 0),
+      totalBytesSaved: Number(prevStats.totalBytesSaved || 0) + Number(bytesSaved || 0),
+      lastRunAt: compressed > 0 ? entry2.createdAt : prevStats.lastRunAt || null
+    };
+    return {
+      ...current,
+      imageCompressionHistory: [entry2, ...current.imageCompressionHistory || []].slice(
+        0,
+        IMAGE_HISTORY_LIMIT
+      ),
+      imageCompressionStats: nextStats
+    };
+  });
+  const history = Array.isArray(next.imageCompressionHistory) ? next.imageCompressionHistory : [];
+  return {
+    entry: entry2,
+    history,
+    stats: next.imageCompressionStats || {},
+    lastRun: history[0] || null
+  };
+}
 async function loadImageOptimizerPage({
   shop,
   storeDomain,
@@ -3631,8 +5592,11 @@ async function loadImageOptimizerPage({
   limit = 25,
   pageInfo = "",
   query = "",
-  statusFilter = "all"
+  statusFilter = "all",
+  tab = "alt",
+  compressionFilter = "all"
 }) {
+  const activeTab = String(tab || "alt").trim().toLowerCase() === "compression" ? "compression" : "alt";
   const { rows, pagination } = await fetchProductImages({
     storeDomain,
     token,
@@ -3641,7 +5605,7 @@ async function loadImageOptimizerPage({
     pageInfo,
     query
   });
-  const normalizedRows = rows.map((row) => {
+  let workingRows = rows.map((row) => {
     const validation = validateImageAlt(row.altText);
     return {
       ...row,
@@ -3654,20 +5618,52 @@ async function loadImageOptimizerPage({
       validation
     };
   });
+  let compressionSummary = null;
+  if (activeTab === "compression") {
+    workingRows = await probeImageRowsBatch(workingRows, { concurrency: 6 });
+    compressionSummary = summarizeCompressionRows(workingRows);
+  }
   const filter = normalizeImageStatusFilter(statusFilter);
-  const filteredRows = normalizedRows.filter((row) => {
+  const compFilter = normalizeImageCompressionFilter(compressionFilter);
+  const filteredRows = workingRows.filter((row) => {
+    if (activeTab === "compression") {
+      if (compFilter === "all") return true;
+      const h = row.sizeHealth || analyzeImageSizeHealth(row);
+      if (compFilter === "critical") return h.status === "critical";
+      if (compFilter === "needs-optimization") return h.needsOptimization;
+      if (compFilter === "optimal") return h.status === "optimal";
+      return true;
+    }
     if (filter === "all") return true;
     const needsFix = !row.validation.valid || row.validation.generic || row.validation.tooShort;
     return filter === "needs-fix" ? needsFix : !needsFix;
   });
   const pageCheck = validateImageAltRows(filteredRows);
-  const appState = shop ? await getAppState(shop) : { imageOptimizerHistory: [] };
+  const appState = shop ? await getAppState(shop) : {
+    imageOptimizerHistory: [],
+    imageCompressionHistory: [],
+    imageCompressionStats: {}
+  };
   const history = Array.isArray(appState.imageOptimizerHistory) ? appState.imageOptimizerHistory : [];
+  const compressionHistory = Array.isArray(appState.imageCompressionHistory) ? appState.imageCompressionHistory : [];
+  const compressionStats = appState.imageCompressionStats || {
+    totalImagesOptimized: 0,
+    totalBytesBefore: 0,
+    totalBytesAfter: 0,
+    totalBytesSaved: 0,
+    lastRunAt: null
+  };
   return {
+    tab: activeTab,
     rows: filteredRows,
     pagination,
     summary: pageCheck.summary,
     statusFilter: filter,
+    compressionFilter: compFilter,
+    compressionSummary: compressionSummary || summarizeCompressionRows(filteredRows),
+    compressionStats,
+    compressionHistory: compressionHistory.slice(0, IMAGE_HISTORY_LIMIT),
+    lastCompressionRun: compressionHistory[0] || null,
     history: history.slice(0, IMAGE_HISTORY_LIMIT),
     lastRun: history[0] || null
   };
@@ -3886,6 +5882,7 @@ async function runAiAutoFixProducts({
   if (!hasSuperAccess && !initialBalance.allowed) {
     return {
       ok: false,
+      outOfCredits: true,
       error: `Insufficient AI tokens. Auto-fix requires ${initialBalance.cost} tokens per product, but you have ${initialBalance.availableCredits} remaining.`
     };
   }
@@ -4418,6 +6415,329 @@ async function applyImageAltFixesAndRescan({
     summary: appliedCheck.summary,
     history: historyState.history,
     lastRun: historyState.lastRun
+  };
+}
+async function previewImageCompressionBatch({
+  rows = [],
+  compressionOptions = {}
+}) {
+  const safeRows = (Array.isArray(rows) ? rows : []).filter((r) => (r == null ? void 0 : r.id) && (r == null ? void 0 : r.imageUrl));
+  if (!safeRows.length) {
+    return {
+      ok: false,
+      error: "Select at least one image row to estimate compression savings.",
+      previews: []
+    };
+  }
+  const options = normalizeCompressionOptions(compressionOptions);
+  const previews = new Array(safeRows.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < safeRows.length) {
+      const idx = cursor;
+      cursor += 1;
+      const row = safeRows[idx];
+      try {
+        const downloaded = await downloadImageBuffer(row.imageUrl);
+        const compressed = await compressImageBuffer(downloaded.buffer, options);
+        previews[idx] = {
+          id: String(row.id),
+          ok: true,
+          skipped: compressed.skipped,
+          reason: compressed.reason,
+          originalBytes: compressed.originalBytes,
+          compressedBytes: compressed.compressedBytes,
+          savedBytes: compressed.savedBytes,
+          savedPercent: compressed.savedPercent,
+          originalWidth: compressed.originalWidth,
+          originalHeight: compressed.originalHeight,
+          width: compressed.width,
+          height: compressed.height,
+          originalFormat: compressed.originalFormat,
+          format: compressed.format,
+          resized: compressed.resized,
+          formatChanged: compressed.formatChanged
+        };
+      } catch (error) {
+        previews[idx] = {
+          id: String(row.id),
+          ok: false,
+          skipped: false,
+          error: (error == null ? void 0 : error.message) || "Failed to analyze image bytes."
+        };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(3, safeRows.length) }, () => worker()));
+  let totalOriginalBytes = 0;
+  let totalCompressedBytes = 0;
+  let totalSavedBytes = 0;
+  let optimizableCount = 0;
+  for (const item of previews) {
+    if (!(item == null ? void 0 : item.ok)) continue;
+    totalOriginalBytes += Number(item.originalBytes || 0);
+    totalCompressedBytes += Number(item.compressedBytes || 0);
+    totalSavedBytes += Number(item.savedBytes || 0);
+    if (!item.skipped && item.savedBytes > 0) {
+      optimizableCount += 1;
+    }
+  }
+  const totalSavedPercent = totalOriginalBytes > 0 ? Math.round(totalSavedBytes / totalOriginalBytes * 1e3) / 10 : 0;
+  return {
+    ok: true,
+    options,
+    previews,
+    totals: {
+      checked: previews.length,
+      optimizableCount,
+      totalOriginalBytes,
+      totalCompressedBytes,
+      totalSavedBytes,
+      totalSavedPercent
+    }
+  };
+}
+async function applyImageCompressionBatch({
+  shop,
+  storeDomain,
+  token,
+  apiVersion,
+  rows = [],
+  compressionOptions = {},
+  hasSuperAccess
+}) {
+  var _a2;
+  const safeRows = (Array.isArray(rows) ? rows : []).filter(
+    (r) => (r == null ? void 0 : r.id) && (r == null ? void 0 : r.productId) && (r == null ? void 0 : r.imageUrl)
+  );
+  const options = normalizeCompressionOptions(compressionOptions);
+  if (!safeRows.length) {
+    const historyState2 = await appendImageCompressionHistory({
+      shop,
+      status: "failed",
+      preset: options.preset,
+      attempted: 0,
+      note: "No valid product images were selected for compression."
+    });
+    return {
+      ok: false,
+      error: "Select at least one image row with a valid URL to compress.",
+      results: [],
+      compressionHistory: historyState2.history,
+      compressionStats: historyState2.stats,
+      lastCompressionRun: historyState2.lastRun
+    };
+  }
+  let effectiveSuperAccess = Boolean(hasSuperAccess);
+  if (shop && typeof hasSuperAccess !== "boolean") {
+    const control = await getOrCreateStoreControl(shop).catch(() => null);
+    effectiveSuperAccess = Boolean(control == null ? void 0 : control.superAccess);
+  }
+  let creditsDeducted = 0;
+  let creditsRemaining;
+  let accountPlan = "FREE";
+  let stoppedReason = "";
+  if (shop && !effectiveSuperAccess) {
+    const initialBalance = await checkCreditBalance(shop, "image_compression");
+    creditsRemaining = initialBalance.availableCredits;
+    accountPlan = initialBalance.plan || "FREE";
+    if (!initialBalance.allowed) {
+      return {
+        ok: false,
+        outOfCredits: true,
+        error: `Insufficient AI tokens. Image compression requires ${initialBalance.cost} token per compressed image, but you have ${initialBalance.availableCredits} remaining.`,
+        results: [],
+        creditsDeducted: 0,
+        creditsRemaining: initialBalance.availableCredits,
+        plan: accountPlan,
+        superAccess: false
+      };
+    }
+  } else if (shop && effectiveSuperAccess) {
+    const initialBalance = await checkCreditBalance(shop, "image_compression").catch(() => null);
+    creditsRemaining = initialBalance == null ? void 0 : initialBalance.availableCredits;
+    accountPlan = (initialBalance == null ? void 0 : initialBalance.plan) || "PRO";
+  }
+  const results = [];
+  let compressedCount = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
+  let totalBytesBefore = 0;
+  let totalBytesAfter = 0;
+  let totalBytesSaved = 0;
+  for (const row of safeRows) {
+    if (shop && !effectiveSuperAccess && compressedCount > 0) {
+      const stepBalance = await checkCreditBalance(shop, "image_compression");
+      creditsRemaining = stepBalance.availableCredits;
+      if (!stepBalance.allowed) {
+        stoppedReason = `Stopped after ${compressedCount} compressed image(s): insufficient remaining AI tokens (${stepBalance.availableCredits} left, requires ${CREDIT_COSTS.image_compression}/image).`;
+        break;
+      }
+    }
+    try {
+      const downloaded = await downloadImageBuffer(row.imageUrl);
+      const compressed = await compressImageBuffer(downloaded.buffer, options);
+      if (compressed.skipped) {
+        skippedCount += 1;
+        results.push({
+          id: String(row.id),
+          productId: String(row.productId),
+          productTitle: row.productTitle || "",
+          ok: true,
+          skipped: true,
+          reason: compressed.reason || "Already optimal.",
+          originalBytes: compressed.originalBytes,
+          compressedBytes: compressed.originalBytes,
+          savedBytes: 0,
+          savedPercent: 0,
+          width: compressed.width,
+          height: compressed.height,
+          format: compressed.format
+        });
+        continue;
+      }
+      const filename = buildSafeImageFilename({
+        productHandle: row.productHandle,
+        productTitle: row.productTitle,
+        position: row.position,
+        extension: compressed.extension
+      });
+      const replaced = await replaceProductImageWithCompressed({
+        storeDomain,
+        token,
+        apiVersion,
+        productId: row.productId,
+        imageId: row.id,
+        buffer: compressed.buffer,
+        filename,
+        mimeType: compressed.mimeType,
+        altText: row.altText || "",
+        position: row.position || 1,
+        variantIds: row.variantIds || []
+      });
+      const finalWidth = Number(replaced.width || compressed.width || row.width || 0);
+      const finalHeight = Number(replaced.height || compressed.height || row.height || 0);
+      const sizeHealth = analyzeImageSizeHealth({
+        width: finalWidth,
+        height: finalHeight,
+        fileSizeBytes: compressed.compressedBytes,
+        format: compressed.format
+      });
+      compressedCount += 1;
+      totalBytesBefore += compressed.originalBytes;
+      totalBytesAfter += compressed.compressedBytes;
+      totalBytesSaved += compressed.savedBytes;
+      if (shop) {
+        const deduction = await deductCredits({
+          shop,
+          actionType: "image_compression",
+          customCost: CREDIT_COSTS.image_compression,
+          productId: row.productId,
+          productTitle: row.productTitle || `Product #${row.productId}`,
+          modelUsed: "sharp-image-optimizer",
+          bypassLimit: effectiveSuperAccess
+        });
+        creditsDeducted += deduction.deducted;
+        creditsRemaining = deduction.remainingCredits;
+        accountPlan = deduction.plan || accountPlan;
+      }
+      await recordProductRevision({
+        shop,
+        productId: row.productId,
+        productTitle: row.productTitle || `Product #${row.productId}`,
+        changeType: "IMAGE_COMPRESSED",
+        beforeValues: {
+          imageId: String(row.id),
+          imageUrl: row.imageUrl,
+          imageFileSize: formatBytes$1(compressed.originalBytes),
+          imageDimensions: `${compressed.originalWidth}×${compressed.originalHeight}`,
+          imageFormat: compressed.originalFormat.toUpperCase()
+        },
+        afterValues: {
+          imageId: replaced.newImageId || String(row.id),
+          imageUrl: replaced.newImageUrl || row.imageUrl,
+          imageFileSize: `${formatBytes$1(compressed.compressedBytes)} (-${compressed.savedPercent}%)`,
+          imageDimensions: `${finalWidth}×${finalHeight}`,
+          imageFormat: compressed.format.toUpperCase()
+        }
+      });
+      results.push({
+        id: String(row.id),
+        newImageId: replaced.newImageId || String(row.id),
+        newImageUrl: replaced.newImageUrl || row.imageUrl,
+        productId: String(row.productId),
+        productTitle: row.productTitle || "",
+        ok: true,
+        skipped: false,
+        originalBytes: compressed.originalBytes,
+        compressedBytes: compressed.compressedBytes,
+        savedBytes: compressed.savedBytes,
+        savedPercent: compressed.savedPercent,
+        originalWidth: compressed.originalWidth,
+        originalHeight: compressed.originalHeight,
+        width: finalWidth,
+        height: finalHeight,
+        format: compressed.format,
+        sizeHealth
+      });
+    } catch (error) {
+      failedCount += 1;
+      results.push({
+        id: String(row.id),
+        productId: String(row.productId),
+        productTitle: row.productTitle || "",
+        ok: false,
+        skipped: false,
+        error: (error == null ? void 0 : error.message) || "Failed to compress and upload image."
+      });
+    }
+  }
+  const savedPercent = totalBytesBefore > 0 ? Math.round(totalBytesSaved / totalBytesBefore * 1e3) / 10 : 0;
+  const noteParts = [];
+  if (compressedCount > 0) {
+    noteParts.push(
+      `Compressed ${compressedCount} image(s), saved ${formatBytes$1(totalBytesSaved)} (${savedPercent}%).`
+    );
+  }
+  if (skippedCount > 0) noteParts.push(`${skippedCount} already optimal.`);
+  if (failedCount > 0) noteParts.push(`${failedCount} failed.`);
+  if (stoppedReason) noteParts.push(stoppedReason);
+  const historyState = await appendImageCompressionHistory({
+    shop,
+    status: compressedCount === 0 && failedCount > 0 ? "failed" : "success",
+    preset: options.preset,
+    attempted: safeRows.length,
+    compressed: compressedCount,
+    skipped: skippedCount,
+    failed: failedCount,
+    bytesBefore: totalBytesBefore,
+    bytesAfter: totalBytesAfter,
+    bytesSaved: totalBytesSaved,
+    note: noteParts.join(" ") || "No changes applied."
+  });
+  const firstFailure = ((_a2 = results.find((item) => !item.ok)) == null ? void 0 : _a2.error) || "";
+  const allFailed = compressedCount === 0 && skippedCount === 0 && failedCount > 0;
+  return {
+    ok: !allFailed,
+    error: allFailed ? firstFailure || "Failed to compress selected images." : failedCount > 0 ? `${failedCount} image(s) failed: ${firstFailure}` : "",
+    options,
+    compressedCount,
+    skippedCount,
+    failedCount,
+    totalBytesBefore,
+    totalBytesAfter,
+    totalBytesSaved,
+    totalSavedPercent: savedPercent,
+    creditsDeducted,
+    creditsRemaining,
+    plan: accountPlan,
+    superAccess: effectiveSuperAccess,
+    stoppedReason,
+    outOfCredits: Boolean(stoppedReason),
+    results,
+    compressionHistory: historyState.history,
+    compressionStats: historyState.stats,
+    lastCompressionRun: historyState.lastRun
   };
 }
 async function regenerateSitemap({
@@ -5291,7 +7611,7 @@ function buildReturnUrl(shop, host, statusParam) {
   if (host) params.set("host", host);
   return `/app/seo-audit?${params.toString()}`;
 }
-const loader$n = async ({
+const loader$o = async ({
   request
 }) => {
   const url = new URL(request.url);
@@ -5358,7 +7678,7 @@ const loader$n = async ({
 };
 const route7 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
-  loader: loader$n
+  loader: loader$o
 }, Symbol.toStringTag, { value: "Module" }));
 function loginErrorMessage(loginErrors) {
   if ((loginErrors == null ? void 0 : loginErrors.shop) === LoginErrorType.MissingShop) {
@@ -5368,7 +7688,7 @@ function loginErrorMessage(loginErrors) {
   }
   return {};
 }
-const loader$m = async ({
+const loader$n = async ({
   request
 }) => {
   const errors = loginErrorMessage(await login(request));
@@ -5419,7 +7739,7 @@ const route8 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProper
   __proto__: null,
   action: action$h,
   default: route$1,
-  loader: loader$m
+  loader: loader$n
 }, Symbol.toStringTag, { value: "Module" }));
 const superadminStyles = "/assets/superadmin-B600NvlH.css";
 const toastStyles = "/assets/toast-BrRlBN_F.css";
@@ -5924,7 +8244,7 @@ async function deleteSuperAdminUser({ targetUserId, actingUserId }) {
   await prisma.superAdminUser.delete({ where: { id: targetUserId } });
   return { deleted: true };
 }
-const links$e = () => [{
+const links$f = () => [{
   rel: "stylesheet",
   href: superadminStyles
 }, {
@@ -5941,7 +8261,7 @@ function buildCookieResponseHeaders(cookies) {
   }
   return headers2;
 }
-const loader$l = async ({
+const loader$m = async ({
   request
 }) => {
   const url = new URL(request.url);
@@ -6065,10 +8385,10 @@ const route9 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProper
   action: action$g,
   default: superadmin,
   headers: headers$2,
-  links: links$e,
-  loader: loader$l
+  links: links$f,
+  loader: loader$m
 }, Symbol.toStringTag, { value: "Module" }));
-const loader$k = async ({
+const loader$l = async ({
   request
 }) => {
   await requireSuperAdmin(request);
@@ -6919,13 +9239,13 @@ const route10 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   __proto__: null,
   action: action$f,
   default: superadmin__index,
-  loader: loader$k
+  loader: loader$l
 }, Symbol.toStringTag, { value: "Module" }));
-const links$d = () => [{
+const links$e = () => [{
   rel: "stylesheet",
   href: superadminStyles
 }];
-const loader$j = async ({
+const loader$k = async ({
   request
 }) => {
   await ensureFixedSuperAdmin();
@@ -7041,10 +9361,10 @@ const route11 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   __proto__: null,
   action: action$e,
   default: superadmin_login,
-  links: links$d,
-  loader: loader$j
+  links: links$e,
+  loader: loader$k
 }, Symbol.toStringTag, { value: "Module" }));
-const loader$i = async ({
+const loader$j = async ({
   request
 }) => {
   const currentUser = await requireSuperAdmin(request);
@@ -7353,9 +9673,9 @@ const route12 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   __proto__: null,
   action: action$d,
   default: superadmin_users,
-  loader: loader$i
+  loader: loader$j
 }, Symbol.toStringTag, { value: "Module" }));
-const loader$h = async ({
+const loader$i = async ({
   request
 }) => {
   var _a2, _b;
@@ -7962,7 +10282,7 @@ const route13 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   __proto__: null,
   action: action$c,
   default: superadmin_ai,
-  loader: loader$h
+  loader: loader$i
 }, Symbol.toStringTag, { value: "Module" }));
 const index = "_index_12o3y_1";
 const heading = "_heading_12o3y_11";
@@ -7984,7 +10304,7 @@ const styles = {
   button,
   list
 };
-const loader$g = async ({
+const loader$h = async ({
   request
 }) => {
   const url = new URL(request.url);
@@ -8051,9 +10371,9 @@ const route = UNSAFE_withComponentProps(function App2() {
 const route14 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   default: route,
-  loader: loader$g
+  loader: loader$h
 }, Symbol.toStringTag, { value: "Module" }));
-const loader$f = async ({
+const loader$g = async ({
   request
 }) => {
   await authenticate.admin(request);
@@ -8065,9 +10385,9 @@ const headers$1 = (headersArgs) => {
 const route15 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   headers: headers$1,
-  loader: loader$f
+  loader: loader$g
 }, Symbol.toStringTag, { value: "Module" }));
-const seoStyles = "/assets/seo-CP-p3b-E.css";
+const seoStyles = "/assets/seo-CVEbgQ8s.css";
 function dispatchCreditsUpdate(detail) {
   if (typeof window === "undefined" || !detail) return;
   window.dispatchEvent(new CustomEvent("ecomseo:credits", { detail }));
@@ -8075,11 +10395,12 @@ function dispatchCreditsUpdate(detail) {
 const WORKSPACE_GROUPS = Object.freeze({
   products: {
     title: "Products & Media",
-    subtitle: "Edit product listings, bulk meta tags, URL handles with 301 safety, and image ALT tags.",
+    subtitle: "Edit product listings, bulk meta tags, URL handles with 301 safety, image compression, and ALT tags.",
     tabs: [
       { key: "products", label: "Product SEO", to: "/app/products" },
       { key: "bulk_meta", label: "Bulk Meta", to: "/app/bulk-meta" },
       { key: "url_optimization", label: "URLs & 301s", to: "/app/url-optimization" },
+      { key: "image_optimizer", label: "Image Compression", to: "/app/image-optimizer?tab=compression" },
       { key: "image_optimizer", label: "Image ALT & Vision", to: "/app/image-optimizer" }
     ]
   },
@@ -8101,7 +10422,8 @@ const APP_MENU_GROUPS = Object.freeze([
     to: "/app",
     submenus: [
       { label: "SEO Checklist", to: "/app" },
-      { label: "Analytics & Trends", to: "/app#analytics" }
+      { label: "Analytics & Trends", to: "/app#analytics" },
+      { label: "Full AI Mode", to: "/app/ai-mode", featureKey: "ai_features" }
     ]
   },
   {
@@ -8124,6 +10446,7 @@ const APP_MENU_GROUPS = Object.freeze([
       { label: "Product SEO", to: "/app/products", featureKey: "products" },
       { label: "Bulk Meta", to: "/app/bulk-meta", featureKey: "bulk_meta" },
       { label: "URLs & 301s", to: "/app/url-optimization", featureKey: "url_optimization" },
+      { label: "Image Compression", to: "/app/image-optimizer?tab=compression", featureKey: "image_optimizer" },
       { label: "Image ALT & Vision", to: "/app/image-optimizer", featureKey: "image_optimizer" }
     ]
   },
@@ -8180,9 +10503,19 @@ function isSubmenuTargetActive(targetTo, pathname, search, hash) {
     const mode = new URLSearchParams(search || "").get("mode");
     return !mode;
   }
+  if (targetPath === "/app/image-optimizer") {
+    const tab = new URLSearchParams(search || "").get("tab");
+    return tab !== "compression";
+  }
   return true;
 }
-function AppMenuShell({ creditAccount = null, storeControl = null }) {
+function AppMenuShell({
+  creditAccount = null,
+  storeControl = null,
+  canOpenAiMode = false,
+  onOpenAiMode = null,
+  aiModeOpen = false
+}) {
   var _a2;
   const { pathname, search, hash } = useLocation();
   const [clientHash, setClientHash] = useState("");
@@ -8248,15 +10581,31 @@ function AppMenuShell({ creditAccount = null, storeControl = null }) {
           }) }) : null
         ] }, group.id);
       }) }),
-      creditAccount || hasSuperAccess ? /* @__PURE__ */ jsx(
-        CreditPill,
-        {
-          available: (creditAccount == null ? void 0 : creditAccount.availableCredits) ?? 0,
-          total: (creditAccount == null ? void 0 : creditAccount.effectiveTotal) ?? PLAN_ALLOWANCES.FREE,
-          plan: (creditAccount == null ? void 0 : creditAccount.plan) || "FREE",
-          superAccess: hasSuperAccess
-        }
-      ) : null
+      /* @__PURE__ */ jsxs("div", { className: "seo-nav-actions", children: [
+        canOpenAiMode && typeof onOpenAiMode === "function" ? /* @__PURE__ */ jsxs(
+          "button",
+          {
+            type: "button",
+            className: "ai-mode-launch-btn",
+            onClick: onOpenAiMode,
+            "aria-expanded": aiModeOpen,
+            "aria-haspopup": "dialog",
+            children: [
+              /* @__PURE__ */ jsx("span", { "aria-hidden": "true", children: "✨" }),
+              /* @__PURE__ */ jsx("span", { children: "AI Mode" })
+            ]
+          }
+        ) : null,
+        creditAccount || hasSuperAccess ? /* @__PURE__ */ jsx(
+          CreditPill,
+          {
+            available: (creditAccount == null ? void 0 : creditAccount.availableCredits) ?? 0,
+            total: (creditAccount == null ? void 0 : creditAccount.effectiveTotal) ?? PLAN_ALLOWANCES.FREE,
+            plan: (creditAccount == null ? void 0 : creditAccount.plan) || "FREE",
+            superAccess: hasSuperAccess
+          }
+        ) : null
+      ] })
     ] }),
     ((_a2 = activeGroup == null ? void 0 : activeGroup.submenus) == null ? void 0 : _a2.length) ? /* @__PURE__ */ jsxs("nav", { className: "app-submenu-strip", "aria-label": `${activeGroup.label} submenus`, children: [
       /* @__PURE__ */ jsxs("span", { className: "app-submenu-label", children: [
@@ -8280,7 +10629,7 @@ function AppMenuShell({ creditAccount = null, storeControl = null }) {
 }
 function WorkspaceSubnav({ group }) {
   var _a2;
-  const { pathname } = useLocation();
+  const { pathname, search, hash } = useLocation();
   const matches = useMatches();
   const config = WORKSPACE_GROUPS[group];
   if (!config) return null;
@@ -8291,7 +10640,7 @@ function WorkspaceSubnav({ group }) {
     if (!storeControl || storeControl.accessLevel === "FULL") return true;
     return allowedSet.has(tab.key);
   });
-  const activeTab = visibleTabs.find((tab) => pathname === tab.to);
+  const activeTab = visibleTabs.find((tab) => isSubmenuTargetActive(tab.to, pathname, search, hash)) || visibleTabs.find((tab) => pathname === String(tab.to).split("?")[0]);
   return /* @__PURE__ */ jsx("section", { className: "workspace-header-card", children: /* @__PURE__ */ jsx("div", { className: "workspace-header-top", children: /* @__PURE__ */ jsxs("div", { style: { display: "grid", gap: "4px" }, children: [
     /* @__PURE__ */ jsx("h1", { className: "page-title", style: { fontSize: "20px" }, children: activeTab ? `${config.title} — ${activeTab.label}` : config.title }),
     /* @__PURE__ */ jsx("p", { className: "seo-muted", style: { fontSize: "13px" }, children: config.subtitle })
@@ -8379,6 +10728,3263 @@ function AiDiffInspector({ auditResult }) {
       auditResult.verdict
     ] }) })
   ] });
+}
+const STARTER_PROMPTS = [
+  "Audit my store and fix my biggest critical SEO issues now",
+  "Update SEO, meta tags, and URL handles on my top broken products",
+  "Compress oversized product images for faster PageSpeed LCP",
+  "Fix missing image ALT tags, robots.txt, and rebuild my sitemap"
+];
+const QUICK_FAST_COMMANDS = [
+  {
+    id: "quick-scan",
+    icon: "🔍",
+    label: "Full SEO Scan",
+    hint: "Scan catalog & refresh score",
+    type: "RUN_FULL_SCAN",
+    params: {}
+  },
+  {
+    id: "quick-autofix",
+    icon: "✨",
+    label: "AI Fix Top 3 Products",
+    hint: `${CREDIT_COSTS.product_seo_fix} tok/product · Title & Meta`,
+    type: "AUTO_FIX_PRODUCTS",
+    params: { maxProducts: 3 }
+  },
+  {
+    id: "quick-description",
+    icon: "📝",
+    label: "AI Fix Descriptions",
+    hint: `${CREDIT_COSTS.product_content_fix} tok/product · Rich HTML`,
+    type: "FIX_PRODUCT_DESCRIPTION",
+    params: { maxProducts: 2, goal: "expand" }
+  },
+  {
+    id: "quick-alt",
+    icon: "🏷️",
+    label: "Fix Missing ALT",
+    hint: "Free pattern SEO ALT update",
+    type: "FIX_IMAGE_ALT",
+    params: { maxImages: 10 }
+  },
+  {
+    id: "quick-compress",
+    icon: "🗜️",
+    label: "Compress Heavy Images",
+    hint: `${CREDIT_COSTS.image_compression} tok/compressed img (Sharp)`,
+    type: "COMPRESS_HEAVY_IMAGES",
+    params: { maxImages: 8 }
+  },
+  {
+    id: "quick-ps-mobile",
+    icon: "📱",
+    label: "Mobile Speed Test",
+    hint: "Live PageSpeed + LCP",
+    type: "RUN_PAGESPEED_TEST",
+    params: { strategy: "mobile" }
+  },
+  {
+    id: "quick-ps-desktop",
+    icon: "💻",
+    label: "Desktop Speed Test",
+    hint: "Live desktop diagnostics",
+    type: "RUN_PAGESPEED_TEST",
+    params: { strategy: "desktop" }
+  },
+  {
+    id: "quick-robots",
+    icon: "🤖",
+    label: "Best-Practice Robots.txt",
+    hint: "Disallow /cart & /search",
+    type: "FIX_ROBOTS_TXT",
+    params: { useAi: false }
+  },
+  {
+    id: "quick-sitemap",
+    icon: "🗺️",
+    label: "Rebuild Sitemap",
+    hint: "Sync active URLs",
+    type: "REGENERATE_SITEMAP",
+    params: {}
+  },
+  {
+    id: "quick-rollback",
+    icon: "↩️",
+    label: "Undo Last Edit",
+    hint: "Rollback latest product revision",
+    type: "ROLLBACK_REVISION",
+    params: {}
+  }
+];
+function actionIcon(type) {
+  switch (type) {
+    case "RUN_FULL_SCAN":
+      return "🔍";
+    case "AUTO_FIX_PRODUCTS":
+      return "✨";
+    case "FIX_PRODUCT_DESCRIPTION":
+    case "UPDATE_SPECIFIC_PRODUCT":
+      return "📝";
+    case "FIX_IMAGE_ALT":
+      return "🏷️";
+    case "COMPRESS_HEAVY_IMAGES":
+      return "🗜️";
+    case "FIX_ROBOTS_TXT":
+      return "🤖";
+    case "REGENERATE_SITEMAP":
+      return "🗺️";
+    case "RUN_PAGESPEED_TEST":
+      return "⚡";
+    case "TOGGLE_AUTOPILOT":
+      return "🚀";
+    case "ROLLBACK_REVISION":
+      return "↩️";
+    case "OPEN_ROUTE":
+      return "↗";
+    default:
+      return "⚡";
+  }
+}
+function formatActionCost(action2, superAccess, selectedProduct = null) {
+  if (!action2) return "";
+  const estimate = estimateChatActionTokens(action2, { superAccess, selectedProduct });
+  if (estimate.standardTotal > 0 || action2.type === "COMPRESS_HEAVY_IMAGES" || action2.type === "AUTO_FIX_PRODUCTS" || action2.type === "FIX_PRODUCT_DESCRIPTION") {
+    return estimate.badgeLabel;
+  }
+  return action2.costLabel || estimate.badgeLabel || "";
+}
+function renderLines(text2) {
+  const parts = String(text2 || "").split(/\r?\n/);
+  return parts.map((line, index2) => /* @__PURE__ */ jsxs("span", { children: [
+    line,
+    index2 < parts.length - 1 ? /* @__PURE__ */ jsx("br", {}) : null
+  ] }, `${index2}-${line.slice(0, 12)}`));
+}
+function formatScoreDelta(report) {
+  if (!report || report.afterScore == null) return null;
+  if (report.beforeScore == null) {
+    return { text: `SEO ${report.afterScore}/100`, tone: "good" };
+  }
+  const delta = Number(report.scoreDelta || 0);
+  if (delta > 0) {
+    return { text: `SEO ${report.beforeScore} → ${report.afterScore} (+${delta})`, tone: "good" };
+  }
+  if (delta < 0) {
+    return { text: `SEO ${report.beforeScore} → ${report.afterScore} (${delta})`, tone: "warn" };
+  }
+  return { text: `SEO ${report.afterScore}/100 (Live)`, tone: "neutral" };
+}
+function AiChatPanel({
+  mode = "drawer",
+  open = true,
+  initialHistory = [],
+  initialSnapshot = null,
+  initialCatalogProducts = [],
+  aiReady = true,
+  aiUnavailableReason = "",
+  creditAccount = {},
+  onClose = null,
+  isDrawerExpanded = false,
+  onToggleDrawerExpand = null
+}) {
+  var _a2;
+  const chatFetcher = useFetcher();
+  const execFetcher = useFetcher();
+  const stateFetcher = useFetcher();
+  const catalogFetcher = useFetcher();
+  const navigate = useNavigate();
+  const revalidator = useRevalidator();
+  const headingId = useId();
+  const inputId = useId();
+  const hintId = useId();
+  const autoRunId = useId();
+  const productSearchId = useId();
+  const productSelectId = useId();
+  const presetSelectId = useId();
+  const editTitleId = useId();
+  const editKeywordId = useId();
+  const editHandleId = useId();
+  const editMetaTitleId = useId();
+  const editMetaDescId = useId();
+  const [messages, setMessages] = useState(
+    () => Array.isArray(initialHistory) ? initialHistory : []
+  );
+  const [snapshot, setSnapshot] = useState(initialSnapshot);
+  const [catalogProducts, setCatalogProducts] = useState(
+    () => Array.isArray(initialCatalogProducts) ? initialCatalogProducts : []
+  );
+  const [selectedProductId, setSelectedProductId] = useState("");
+  const [productQuery, setProductQuery] = useState("");
+  const [compressionPreset, setCompressionPreset] = useState("balanced");
+  const [showQuickSidebar, setShowQuickSidebar] = useState(true);
+  const [showDrawerQuickBar, setShowDrawerQuickBar] = useState(true);
+  const [showCustomEdit, setShowCustomEdit] = useState(false);
+  const [editFields, setEditFields] = useState({
+    title: "",
+    focusKeyword: "",
+    handle: "",
+    metaTitle: "",
+    metaDescription: ""
+  });
+  const [draft, setDraft] = useState("");
+  const [autoExecute, setAutoExecute] = useState(false);
+  const [executingAction, setExecutingAction] = useState(null);
+  const [pendingConfirmAction, setPendingConfirmAction] = useState(null);
+  const [pendingUserPrompt, setPendingUserPrompt] = useState("");
+  const [liveStatus, setLiveStatus] = useState("");
+  const [liveCredits, setLiveCredits] = useState(() => ({
+    availableCredits: Number((creditAccount == null ? void 0 : creditAccount.availableCredits) ?? 0),
+    superAccess: Boolean(creditAccount == null ? void 0 : creditAccount.superAccess)
+  }));
+  useEffect(() => {
+    setLiveCredits((prev) => ({
+      availableCredits: typeof (creditAccount == null ? void 0 : creditAccount.availableCredits) === "number" ? creditAccount.availableCredits : prev.availableCredits,
+      superAccess: (creditAccount == null ? void 0 : creditAccount.superAccess) !== void 0 ? Boolean(creditAccount.superAccess) : prev.superAccess
+    }));
+  }, [creditAccount == null ? void 0 : creditAccount.availableCredits, creditAccount == null ? void 0 : creditAccount.superAccess]);
+  const messagesContainerRef = useRef(null);
+  const textareaRef = useRef(null);
+  const handledChatRef = useRef(null);
+  const handledExecRef = useRef(null);
+  const handledStateRef = useRef(null);
+  const handledCatalogRef = useRef(null);
+  const hasSyncedOpenRef = useRef(false);
+  const superAccess = Boolean(liveCredits.superAccess || (creditAccount == null ? void 0 : creditAccount.superAccess));
+  const availableTokens = Number(liveCredits.availableCredits ?? 0);
+  const isSending = chatFetcher.state !== "idle";
+  const isExecuting = execFetcher.state !== "idle";
+  const isSearchingCatalog = catalogFetcher.state !== "idle";
+  const selectedProduct = useMemo(
+    () => catalogProducts.find((p) => String(p.id) === String(selectedProductId)) || null,
+    [catalogProducts, selectedProductId]
+  );
+  useEffect(() => {
+    if (Array.isArray(initialHistory) && initialHistory.length > 0 && messages.length === 0) {
+      setMessages(initialHistory);
+    }
+  }, [initialHistory]);
+  useEffect(() => {
+    if (initialSnapshot && !snapshot) {
+      setSnapshot(initialSnapshot);
+    }
+  }, [initialSnapshot]);
+  useEffect(() => {
+    if (Array.isArray(initialCatalogProducts) && initialCatalogProducts.length > 0 && catalogProducts.length === 0) {
+      setCatalogProducts(initialCatalogProducts);
+    }
+  }, [initialCatalogProducts]);
+  useEffect(() => {
+    if (!selectedProduct) {
+      setShowCustomEdit(false);
+      return;
+    }
+    setEditFields({
+      title: selectedProduct.title || "",
+      focusKeyword: selectedProduct.focusKeyword || "",
+      handle: selectedProduct.handle || "",
+      metaTitle: selectedProduct.metaTitle || "",
+      metaDescription: selectedProduct.metaDescription || ""
+    });
+  }, [selectedProduct == null ? void 0 : selectedProduct.id, selectedProduct == null ? void 0 : selectedProduct.metaTitle, selectedProduct == null ? void 0 : selectedProduct.handle, selectedProduct == null ? void 0 : selectedProduct.focusKeyword]);
+  useEffect(() => {
+    var _a3;
+    if (!open) {
+      hasSyncedOpenRef.current = false;
+      return;
+    }
+    if (mode === "drawer") {
+      (_a3 = textareaRef.current) == null ? void 0 : _a3.focus();
+    }
+    if (!hasSyncedOpenRef.current && stateFetcher.state === "idle") {
+      hasSyncedOpenRef.current = true;
+      stateFetcher.submit(
+        { payload: JSON.stringify({ actionType: "get_ai_chat_state" }) },
+        { method: "post", action: "/app/api/ai" }
+      );
+    }
+  }, [open, mode]);
+  useEffect(() => {
+    const data2 = stateFetcher.data;
+    if (!data2 || stateFetcher.state !== "idle" || data2 === handledStateRef.current) return;
+    handledStateRef.current = data2;
+    if (data2.ok && data2.actionType === "get_ai_chat_state") {
+      if (Array.isArray(data2.aiChatHistory)) setMessages(data2.aiChatHistory);
+      if (data2.storeSnapshot) setSnapshot(data2.storeSnapshot);
+      if (Array.isArray(data2.catalogProducts)) setCatalogProducts(data2.catalogProducts);
+      setLiveCredits((prev) => ({
+        availableCredits: typeof data2.creditsRemaining === "number" ? data2.creditsRemaining : prev.availableCredits,
+        superAccess: data2.superAccess !== void 0 ? Boolean(data2.superAccess) : prev.superAccess
+      }));
+      dispatchCreditsUpdate({
+        availableCredits: data2.creditsRemaining,
+        totalCredits: data2.totalCredits,
+        plan: data2.plan,
+        superAccess: data2.superAccess
+      });
+    } else if (data2.ok && data2.actionType === "clear_ai_chat_history") {
+      setMessages([]);
+      setLiveStatus("Conversation cleared.");
+    }
+  }, [stateFetcher.data, stateFetcher.state]);
+  useEffect(() => {
+    const data2 = catalogFetcher.data;
+    if (!data2 || catalogFetcher.state !== "idle" || data2 === handledCatalogRef.current) return;
+    handledCatalogRef.current = data2;
+    if (data2.ok && Array.isArray(data2.catalogProducts)) {
+      setCatalogProducts(data2.catalogProducts);
+      if (data2.catalogProducts.length > 0 && !data2.catalogProducts.some((p) => String(p.id) === String(selectedProductId))) {
+        setSelectedProductId("");
+      }
+    }
+  }, [catalogFetcher.data, catalogFetcher.state]);
+  useEffect(() => {
+    const data2 = chatFetcher.data;
+    if (!data2 || chatFetcher.state !== "idle" || data2 === handledChatRef.current) return;
+    handledChatRef.current = data2;
+    setPendingUserPrompt("");
+    if (!data2.ok) {
+      showToast({
+        tone: "error",
+        title: "AI Mode Error",
+        message: data2.error || "Unable to get a response from AI Mode."
+      });
+      setLiveStatus(data2.error || "AI request failed.");
+      return;
+    }
+    const result = data2.result || {};
+    if (Array.isArray(result.aiChatHistory)) {
+      setMessages(result.aiChatHistory);
+    }
+    if (result.storeSnapshot) {
+      setSnapshot(result.storeSnapshot);
+    }
+    setLiveCredits((prev) => ({
+      availableCredits: typeof data2.creditsRemaining === "number" ? data2.creditsRemaining : prev.availableCredits,
+      superAccess: data2.superAccess !== void 0 ? Boolean(data2.superAccess) : prev.superAccess
+    }));
+    dispatchCreditsUpdate({
+      availableCredits: data2.creditsRemaining,
+      totalCredits: data2.totalCredits,
+      plan: data2.plan,
+      superAccess: data2.superAccess
+    });
+    setLiveStatus("AI Mode responded.");
+    if (autoExecute && result.autoRunActionId && Array.isArray(result.suggestedActions)) {
+      const targetAction = result.suggestedActions.find(
+        (act) => act.id === result.autoRunActionId && act.type !== "OPEN_ROUTE"
+      );
+      const lastMsg = Array.isArray(result.aiChatHistory) ? result.aiChatHistory[result.aiChatHistory.length - 1] : null;
+      if (targetAction && execFetcher.state === "idle") {
+        const autoEst = estimateChatActionTokens(targetAction, {
+          superAccess,
+          selectedProduct
+        });
+        runAction(targetAction, (lastMsg == null ? void 0 : lastMsg.id) || "", { skipConfirm: !autoEst.isBulk });
+      }
+    }
+  }, [chatFetcher.data, chatFetcher.state, autoExecute]);
+  useEffect(() => {
+    const data2 = execFetcher.data;
+    if (!data2 || execFetcher.state !== "idle" || data2 === handledExecRef.current) return;
+    handledExecRef.current = data2;
+    setExecutingAction(null);
+    setPendingConfirmAction(null);
+    if (Array.isArray(data2.aiChatHistory)) {
+      setMessages(data2.aiChatHistory);
+    }
+    if (data2.storeSnapshot) {
+      setSnapshot(data2.storeSnapshot);
+    }
+    if (Array.isArray(data2.catalogProducts)) {
+      setCatalogProducts(data2.catalogProducts);
+    }
+    setLiveCredits((prev) => ({
+      availableCredits: typeof data2.creditsRemaining === "number" ? data2.creditsRemaining : prev.availableCredits,
+      superAccess: data2.superAccess !== void 0 ? Boolean(data2.superAccess) : prev.superAccess
+    }));
+    dispatchCreditsUpdate({
+      availableCredits: data2.creditsRemaining,
+      totalCredits: data2.totalCredits,
+      plan: data2.plan,
+      superAccess: data2.superAccess
+    });
+    const exec = data2.execution || {};
+    if (data2.ok) {
+      setShowCustomEdit(false);
+      setLiveStatus(exec.summary || "Live store update complete.");
+      showToast({
+        tone: "success",
+        title: exec.title || "Live Store Update Applied",
+        message: exec.summary || "Updated your Shopify store SEO configuration."
+      });
+      if (exec.navigateTo) {
+        if (mode === "drawer" && typeof onClose === "function") {
+          onClose();
+        }
+        navigate(exec.navigateTo);
+      } else {
+        revalidator.revalidate();
+      }
+    } else {
+      setLiveStatus(data2.error || exec.error || "Fix failed.");
+      showToast({
+        tone: "error",
+        title: exec.title || "Update Could Not Complete",
+        message: data2.error || exec.error || "Please try again."
+      });
+    }
+  }, [execFetcher.data, execFetcher.state]);
+  useEffect(() => {
+    var _a3;
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const prefersReduced = typeof window !== "undefined" && ((_a3 = window.matchMedia) == null ? void 0 : _a3.call(window, "(prefers-reduced-motion: reduce)").matches);
+    if (prefersReduced) {
+      container.scrollTop = container.scrollHeight;
+    } else {
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    }
+  }, [messages.length, pendingUserPrompt, isExecuting]);
+  const latestAssistantIndex = useMemo(() => {
+    var _a3;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (((_a3 = messages[i]) == null ? void 0 : _a3.role) === "assistant") return i;
+    }
+    return -1;
+  }, [messages]);
+  function sendPrompt(text2) {
+    const clean = String(text2 || "").trim();
+    if (!clean || isSending || isExecuting || !aiReady) return;
+    setDraft("");
+    setPendingUserPrompt(clean);
+    setLiveStatus("");
+    chatFetcher.submit(
+      {
+        payload: JSON.stringify({
+          actionType: "ai_chat",
+          message: clean,
+          autoExecute,
+          selectedProduct: selectedProduct || null
+        })
+      },
+      { method: "post", action: "/app/api/ai" }
+    );
+  }
+  function runAction(action2, messageId = "", { skipConfirm = false } = {}) {
+    var _a3;
+    if (!action2 || isExecuting || isSending) return;
+    if (action2.type === "OPEN_ROUTE" && ((_a3 = action2.params) == null ? void 0 : _a3.route)) {
+      if (mode === "drawer" && typeof onClose === "function") {
+        onClose();
+      }
+      navigate(action2.params.route);
+      return;
+    }
+    const estimate = estimateChatActionTokens(action2, {
+      superAccess,
+      selectedProduct
+    });
+    if (!skipConfirm && estimate.estimatedTokens > 0) {
+      setPendingConfirmAction({ action: action2, messageId, estimate });
+      return;
+    }
+    setPendingConfirmAction(null);
+    setExecutingAction({
+      id: action2.id,
+      label: action2.label || action2.type,
+      estimatedTokens: estimate.estimatedTokens,
+      badgeLabel: estimate.standardTotal > 0 ? estimate.badgeLabel : ""
+    });
+    execFetcher.submit(
+      {
+        payload: JSON.stringify({
+          actionType: "ai_chat_execute",
+          action: action2,
+          messageId
+        })
+      },
+      { method: "post", action: "/app/api/ai" }
+    );
+  }
+  function runQuickCommand(cmd) {
+    if (!cmd || isExecuting || isSending) return;
+    const baseParams = { ...cmd.params || {} };
+    if (cmd.type === "COMPRESS_HEAVY_IMAGES") {
+      baseParams.preset = compressionPreset;
+      if (selectedProduct) baseParams.productIds = [String(selectedProduct.id)];
+    } else if ((cmd.type === "AUTO_FIX_PRODUCTS" || cmd.type === "FIX_PRODUCT_DESCRIPTION") && selectedProduct) {
+      baseParams.maxProducts = 1;
+      baseParams.productIds = [String(selectedProduct.id)];
+    } else if (cmd.type === "FIX_IMAGE_ALT" && selectedProduct) {
+      baseParams.productIds = [String(selectedProduct.id)];
+    }
+    const isProductScoped = selectedProduct && (cmd.type === "AUTO_FIX_PRODUCTS" || cmd.type === "FIX_PRODUCT_DESCRIPTION" || cmd.type === "FIX_IMAGE_ALT" || cmd.type === "COMPRESS_HEAVY_IMAGES");
+    runAction({
+      id: `quick-${cmd.id}-${Date.now()}`,
+      type: cmd.type,
+      label: isProductScoped ? `${cmd.label} (${selectedProduct.title})` : cmd.label,
+      params: baseParams
+    });
+  }
+  function handleSaveCustomProductEdit(event) {
+    event.preventDefault();
+    if (!selectedProduct || isExecuting || isSending) return;
+    runAction({
+      id: `custom-edit-${selectedProduct.id}-${Date.now()}`,
+      type: "UPDATE_SPECIFIC_PRODUCT",
+      label: `Update "${selectedProduct.title}"`,
+      params: {
+        productId: String(selectedProduct.id),
+        title: editFields.title,
+        focusKeyword: editFields.focusKeyword,
+        handle: editFields.handle,
+        metaTitle: editFields.metaTitle,
+        metaDescription: editFields.metaDescription
+      }
+    });
+  }
+  function handleCatalogSearch(event) {
+    event.preventDefault();
+    if (isSearchingCatalog) return;
+    catalogFetcher.submit(
+      {
+        payload: JSON.stringify({
+          actionType: "ai_chat_catalog",
+          query: productQuery.trim()
+        })
+      },
+      { method: "post", action: "/app/api/ai" }
+    );
+  }
+  function clearHistory() {
+    if (isSending || isExecuting || stateFetcher.state !== "idle") return;
+    setPendingConfirmAction(null);
+    stateFetcher.submit(
+      { payload: JSON.stringify({ actionType: "clear_ai_chat_history" }) },
+      { method: "post", action: "/app/api/ai" }
+    );
+  }
+  function handleFormSubmit(event) {
+    event.preventDefault();
+    sendPrompt(draft);
+  }
+  function handleKeyDown(event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendPrompt(draft);
+    }
+  }
+  const scan = (snapshot == null ? void 0 : snapshot.scan) || null;
+  const pageSpeed = (snapshot == null ? void 0 : snapshot.pageSpeed) || null;
+  const autopilotEnabled = Boolean((_a2 = snapshot == null ? void 0 : snapshot.autopilot) == null ? void 0 : _a2.enabled);
+  function renderQuickControlContent() {
+    return /* @__PURE__ */ jsxs("div", { className: "ai-quick-panel-inner", children: [
+      /* @__PURE__ */ jsxs("section", { className: "ai-qp-block", children: [
+        /* @__PURE__ */ jsxs("div", { className: "ai-qp-heading-row", children: [
+          /* @__PURE__ */ jsx("h3", { className: "ai-qp-heading", children: "🎯 Target Product or Entire Store" }),
+          selectedProduct ? /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "button",
+              className: "seo-button ghost",
+              style: { padding: "2px 7px", fontSize: "11px" },
+              onClick: () => setSelectedProductId(""),
+              children: "Reset to Store-Wide"
+            }
+          ) : null
+        ] }),
+        /* @__PURE__ */ jsxs("form", { className: "ai-catalog-search-form", onSubmit: handleCatalogSearch, children: [
+          /* @__PURE__ */ jsx("label", { htmlFor: productSearchId, className: "visually-hidden", children: "Search Shopify products" }),
+          /* @__PURE__ */ jsx(
+            "input",
+            {
+              id: productSearchId,
+              type: "search",
+              className: "ai-qp-input",
+              placeholder: "Search Shopify product title...",
+              value: productQuery,
+              onChange: (e) => setProductQuery(e.target.value)
+            }
+          ),
+          /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "submit",
+              className: "seo-button secondary ai-qp-search-btn",
+              disabled: isSearchingCatalog,
+              children: isSearchingCatalog ? "..." : "Find"
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsx("label", { htmlFor: productSelectId, className: "ai-qp-label", children: "Active Optimization Target" }),
+        /* @__PURE__ */ jsxs(
+          "select",
+          {
+            id: productSelectId,
+            className: "ai-qp-select",
+            value: selectedProductId,
+            onChange: (e) => setSelectedProductId(e.target.value),
+            children: [
+              /* @__PURE__ */ jsxs("option", { value: "", children: [
+                "All Store / Priority Products (",
+                catalogProducts.length,
+                " loaded)"
+              ] }),
+              catalogProducts.map((product) => /* @__PURE__ */ jsxs("option", { value: String(product.id), children: [
+                product.title || product.handle,
+                product.seoScore != null ? ` · SEO ${product.seoScore}%` : "",
+                product.issueCount > 0 ? ` (${product.issueCount} issues)` : ""
+              ] }, product.id))
+            ]
+          }
+        ),
+        selectedProduct ? /* @__PURE__ */ jsxs("div", { className: "ai-selected-product-card", children: [
+          /* @__PURE__ */ jsxs("div", { className: "ai-selected-product-top", children: [
+            /* @__PURE__ */ jsx("strong", { className: "ai-selected-title", children: selectedProduct.title }),
+            selectedProduct.seoScore != null ? /* @__PURE__ */ jsxs(
+              "span",
+              {
+                className: `ai-telemetry-chip ${selectedProduct.seoScore >= 80 ? "good" : "warn"}`,
+                children: [
+                  selectedProduct.seoScore,
+                  "%"
+                ]
+              }
+            ) : null
+          ] }),
+          /* @__PURE__ */ jsxs("div", { className: "ai-selected-meta-line", children: [
+            /* @__PURE__ */ jsxs("span", { children: [
+              "/",
+              selectedProduct.handle
+            ] }),
+            selectedProduct.focusKeyword ? /* @__PURE__ */ jsxs("span", { children: [
+              "· Key: ",
+              /* @__PURE__ */ jsx("strong", { children: selectedProduct.focusKeyword })
+            ] }) : /* @__PURE__ */ jsx("span", { children: "· No focus keyword" })
+          ] }),
+          /* @__PURE__ */ jsxs("div", { className: "ai-selected-actions-grid", children: [
+            /* @__PURE__ */ jsxs(
+              "button",
+              {
+                type: "button",
+                className: "seo-button ai-qp-mini-btn",
+                disabled: isExecuting || isSending || !aiReady,
+                onClick: () => runAction({
+                  id: `target-seo-${selectedProduct.id}-${Date.now()}`,
+                  type: "AUTO_FIX_PRODUCTS",
+                  label: `AI Auto-Fix ${selectedProduct.title}`,
+                  params: { maxProducts: 1, productIds: [String(selectedProduct.id)] }
+                }),
+                children: [
+                  "✨ AI Title & Meta (",
+                  superAccess ? "0" : CREDIT_COSTS.product_seo_fix,
+                  " tok)"
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxs(
+              "button",
+              {
+                type: "button",
+                className: "seo-button secondary ai-qp-mini-btn",
+                disabled: isExecuting || isSending || !aiReady,
+                onClick: () => runAction({
+                  id: `target-desc-${selectedProduct.id}-${Date.now()}`,
+                  type: "FIX_PRODUCT_DESCRIPTION",
+                  label: `AI Fix Description: ${selectedProduct.title}`,
+                  params: {
+                    maxProducts: 1,
+                    goal: "expand",
+                    productIds: [String(selectedProduct.id)]
+                  }
+                }),
+                children: [
+                  "📝 AI Description (",
+                  superAccess ? "0" : CREDIT_COSTS.product_content_fix,
+                  " tok)"
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                type: "button",
+                className: "seo-button secondary ai-qp-mini-btn",
+                disabled: isExecuting || isSending,
+                onClick: () => setShowCustomEdit((prev) => !prev),
+                children: showCustomEdit ? "Hide Custom Edit" : "✏️ Edit Title / Meta"
+              }
+            ),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                type: "button",
+                className: "seo-button secondary ai-qp-mini-btn",
+                disabled: isExecuting || isSending,
+                onClick: () => runAction({
+                  id: `target-alt-${selectedProduct.id}-${Date.now()}`,
+                  type: "FIX_IMAGE_ALT",
+                  label: `Fix ALT: ${selectedProduct.title}`,
+                  params: { maxImages: 10, productIds: [String(selectedProduct.id)] }
+                }),
+                children: "🏷️ Fix Product ALT"
+              }
+            ),
+            /* @__PURE__ */ jsxs(
+              "button",
+              {
+                type: "button",
+                className: "seo-button secondary ai-qp-mini-btn",
+                disabled: isExecuting || isSending,
+                onClick: () => runAction({
+                  id: `target-comp-${selectedProduct.id}-${Date.now()}`,
+                  type: "COMPRESS_HEAVY_IMAGES",
+                  label: `Compress: ${selectedProduct.title}`,
+                  params: {
+                    preset: compressionPreset,
+                    maxImages: 8,
+                    productIds: [String(selectedProduct.id)]
+                  }
+                }),
+                children: [
+                  "🗜️ Compress (",
+                  superAccess ? "0" : `${CREDIT_COSTS.image_compression}/img`,
+                  ")"
+                ]
+              }
+            )
+          ] }),
+          showCustomEdit ? /* @__PURE__ */ jsxs("form", { className: "ai-custom-edit-form", onSubmit: handleSaveCustomProductEdit, children: [
+            /* @__PURE__ */ jsx("label", { htmlFor: editTitleId, className: "ai-qp-label", children: "Product Title" }),
+            /* @__PURE__ */ jsx(
+              "input",
+              {
+                id: editTitleId,
+                type: "text",
+                className: "ai-qp-input",
+                value: editFields.title,
+                onChange: (e) => setEditFields((f) => ({ ...f, title: e.target.value }))
+              }
+            ),
+            /* @__PURE__ */ jsx("label", { htmlFor: editKeywordId, className: "ai-qp-label", children: "Focus Keyword" }),
+            /* @__PURE__ */ jsx(
+              "input",
+              {
+                id: editKeywordId,
+                type: "text",
+                className: "ai-qp-input",
+                placeholder: "e.g. waterproof hiking jacket",
+                value: editFields.focusKeyword,
+                onChange: (e) => setEditFields((f) => ({ ...f, focusKeyword: e.target.value }))
+              }
+            ),
+            /* @__PURE__ */ jsx("label", { htmlFor: editHandleId, className: "ai-qp-label", children: "URL Handle" }),
+            /* @__PURE__ */ jsx(
+              "input",
+              {
+                id: editHandleId,
+                type: "text",
+                className: "ai-qp-input",
+                value: editFields.handle,
+                onChange: (e) => setEditFields((f) => ({ ...f, handle: e.target.value }))
+              }
+            ),
+            /* @__PURE__ */ jsxs("label", { htmlFor: editMetaTitleId, className: "ai-qp-label", children: [
+              "Meta Title (",
+              editFields.metaTitle.length,
+              "/60)"
+            ] }),
+            /* @__PURE__ */ jsx(
+              "input",
+              {
+                id: editMetaTitleId,
+                type: "text",
+                className: "ai-qp-input",
+                value: editFields.metaTitle,
+                onChange: (e) => setEditFields((f) => ({ ...f, metaTitle: e.target.value }))
+              }
+            ),
+            /* @__PURE__ */ jsxs("label", { htmlFor: editMetaDescId, className: "ai-qp-label", children: [
+              "Meta Description (",
+              editFields.metaDescription.length,
+              "/160)"
+            ] }),
+            /* @__PURE__ */ jsx(
+              "textarea",
+              {
+                id: editMetaDescId,
+                className: "ai-qp-input",
+                rows: 2,
+                value: editFields.metaDescription,
+                onChange: (e) => setEditFields((f) => ({ ...f, metaDescription: e.target.value }))
+              }
+            ),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                type: "submit",
+                className: "seo-button",
+                style: { width: "100%", marginTop: "4px" },
+                disabled: isExecuting || isSending,
+                children: isExecuting ? "Saving to Shopify..." : "Save Live to Shopify & Report"
+              }
+            )
+          ] }) : null
+        ] }) : null
+      ] }),
+      /* @__PURE__ */ jsxs("section", { className: "ai-qp-block", children: [
+        /* @__PURE__ */ jsxs("div", { className: "ai-qp-heading-row", children: [
+          /* @__PURE__ */ jsx("h3", { className: "ai-qp-heading", children: "⚡ Fast One-Click Actions" }),
+          /* @__PURE__ */ jsx("span", { className: "ai-qp-sub-note", children: "Live Report in Chat" })
+        ] }),
+        /* @__PURE__ */ jsxs("div", { className: "ai-preset-row", children: [
+          /* @__PURE__ */ jsx("label", { htmlFor: presetSelectId, className: "ai-qp-label", style: { margin: 0 }, children: "Image Compression Preset" }),
+          /* @__PURE__ */ jsxs(
+            "select",
+            {
+              id: presetSelectId,
+              className: "ai-qp-select",
+              value: compressionPreset,
+              onChange: (e) => setCompressionPreset(e.target.value),
+              children: [
+                /* @__PURE__ */ jsx("option", { value: "balanced", children: "Balanced (Recommended · High Quality)" }),
+                /* @__PURE__ */ jsx("option", { value: "lossless", children: "Lossless Ultra-Sharp" }),
+                /* @__PURE__ */ jsx("option", { value: "high", children: "High PageSpeed (Max Savings)" })
+              ]
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsxs("div", { className: "ai-fast-grid", children: [
+          QUICK_FAST_COMMANDS.map((cmd) => {
+            const est = estimateChatActionTokens(
+              { type: cmd.type, params: cmd.params },
+              { superAccess, selectedProduct }
+            );
+            const requiresAi = cmd.type === "AUTO_FIX_PRODUCTS" || cmd.type === "FIX_PRODUCT_DESCRIPTION";
+            return /* @__PURE__ */ jsxs(
+              "button",
+              {
+                type: "button",
+                className: "ai-fast-action-btn",
+                disabled: isExecuting || isSending || requiresAi && !aiReady,
+                onClick: () => runQuickCommand(cmd),
+                title: est.badgeLabel,
+                children: [
+                  /* @__PURE__ */ jsx("span", { className: "ai-fast-icon", "aria-hidden": "true", children: cmd.icon }),
+                  /* @__PURE__ */ jsxs("span", { className: "ai-fast-text", children: [
+                    /* @__PURE__ */ jsx("strong", { children: cmd.label }),
+                    /* @__PURE__ */ jsx("small", { children: est.estimatedTokens > 0 ? `${est.badgeLabel}` : cmd.hint })
+                  ] })
+                ]
+              },
+              cmd.id
+            );
+          }),
+          /* @__PURE__ */ jsxs(
+            "button",
+            {
+              type: "button",
+              className: "ai-fast-action-btn",
+              disabled: isExecuting || isSending,
+              onClick: () => runAction({
+                id: `quick-autopilot-${Date.now()}`,
+                type: "TOGGLE_AUTOPILOT",
+                label: autopilotEnabled ? "Pause Autopilot" : "Enable Autopilot",
+                params: { enabled: !autopilotEnabled }
+              }),
+              children: [
+                /* @__PURE__ */ jsx("span", { className: "ai-fast-icon", "aria-hidden": "true", children: "🚀" }),
+                /* @__PURE__ */ jsxs("span", { className: "ai-fast-text", children: [
+                  /* @__PURE__ */ jsx("strong", { children: autopilotEnabled ? "Pause Autopilot" : "Enable Autopilot" }),
+                  /* @__PURE__ */ jsx("small", { children: autopilotEnabled ? "Currently ON for new products" : "Currently OFF" })
+                ] })
+              ]
+            }
+          )
+        ] })
+      ] })
+    ] });
+  }
+  return /* @__PURE__ */ jsxs("div", { className: `ai-chat-shell ${mode === "page" ? "ai-chat-shell-page" : "ai-chat-shell-drawer"}`, children: [
+    /* @__PURE__ */ jsxs("header", { className: "ai-chat-header", children: [
+      /* @__PURE__ */ jsxs("div", { className: "ai-chat-title-row", children: [
+        /* @__PURE__ */ jsxs("div", { className: "ai-chat-brand", children: [
+          /* @__PURE__ */ jsx("span", { className: "ai-chat-orb", "aria-hidden": "true", children: "✨" }),
+          /* @__PURE__ */ jsxs("div", { children: [
+            mode === "page" ? /* @__PURE__ */ jsx("h1", { id: headingId, className: "ai-chat-title", children: "AI Mode" }) : /* @__PURE__ */ jsx("h2", { id: headingId, className: "ai-chat-title", children: "AI Copilot" }),
+            /* @__PURE__ */ jsx("p", { className: "ai-chat-subtitle", children: "Pick a product or ask naturally — fix SEO, metadata, images, and PageSpeed with live reports" }),
+            "            "
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxs("div", { className: "ai-chat-header-controls", children: [
+          mode === "page" ? /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "button",
+              className: "seo-button secondary ai-chat-icon-btn",
+              onClick: () => setShowQuickSidebar((prev) => !prev),
+              "aria-expanded": showQuickSidebar,
+              children: showQuickSidebar ? "Hide Quick Panel" : "Show Quick Panel"
+            }
+          ) : /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "button",
+              className: "seo-button secondary ai-chat-icon-btn",
+              onClick: () => setShowDrawerQuickBar((prev) => !prev),
+              "aria-expanded": showDrawerQuickBar,
+              children: showDrawerQuickBar ? "Hide Quick Select" : "⚡ Quick Select"
+            }
+          ),
+          mode === "drawer" && typeof onToggleDrawerExpand === "function" ? /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "button",
+              className: "seo-button secondary ai-chat-icon-btn",
+              onClick: onToggleDrawerExpand,
+              "aria-pressed": isDrawerExpanded,
+              title: isDrawerExpanded ? "Restore compact drawer width" : "Expand chatbox to full screen width",
+              children: isDrawerExpanded ? "⤡ Compact" : "⤢ Max Width"
+            }
+          ) : null,
+          messages.length > 0 ? /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "button",
+              className: "seo-button ghost ai-chat-icon-btn",
+              onClick: clearHistory,
+              disabled: isSending || isExecuting,
+              title: "Clear conversation history",
+              children: "Clear"
+            }
+          ) : null,
+          mode === "drawer" ? /* @__PURE__ */ jsx(
+            Link,
+            {
+              to: "/app/ai-mode",
+              className: "seo-button secondary ai-chat-icon-btn",
+              onClick: () => typeof onClose === "function" && onClose(),
+              title: "Open full-page AI Mode workspace",
+              children: "Full Page ↗"
+            }
+          ) : null,
+          mode === "drawer" && typeof onClose === "function" ? /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "button",
+              className: "seo-button secondary ai-chat-close-btn",
+              onClick: onClose,
+              "aria-label": "Close AI Mode chat",
+              children: "✕"
+            }
+          ) : null
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "ai-chat-telemetry-bar", children: [
+        scan ? /* @__PURE__ */ jsxs("span", { className: `ai-telemetry-chip ${scan.criticalCount > 0 ? "warn" : "good"}`, children: [
+          "SEO ",
+          /* @__PURE__ */ jsxs("strong", { children: [
+            scan.healthScore,
+            "/100"
+          ] }),
+          " · ",
+          /* @__PURE__ */ jsx("strong", { children: scan.criticalCount }),
+          " critical"
+        ] }) : /* @__PURE__ */ jsx("span", { className: "ai-telemetry-chip", children: "Not scanned" }),
+        (pageSpeed == null ? void 0 : pageSpeed.mobileScore) != null ? /* @__PURE__ */ jsxs("span", { className: "ai-telemetry-chip", children: [
+          "Mobile ",
+          /* @__PURE__ */ jsxs("strong", { children: [
+            pageSpeed.mobileScore,
+            "/100"
+          ] })
+        ] }) : null,
+        selectedProduct ? /* @__PURE__ */ jsxs("span", { className: "ai-telemetry-chip good", children: [
+          "🎯 ",
+          /* @__PURE__ */ jsx("strong", { children: selectedProduct.title })
+        ] }) : null,
+        /* @__PURE__ */ jsxs("span", { className: `ai-telemetry-chip ${autopilotEnabled ? "good" : ""}`, children: [
+          "Autopilot ",
+          autopilotEnabled ? "ON" : "OFF"
+        ] }),
+        /* @__PURE__ */ jsxs("span", { className: "ai-telemetry-chip", children: [
+          "⚡ ",
+          /* @__PURE__ */ jsx("strong", { children: superAccess ? "∞ Super Access" : `${availableTokens.toLocaleString()} tok` })
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "ai-chat-mode-bar", children: [
+        /* @__PURE__ */ jsxs("label", { htmlFor: autoRunId, className: "ai-autorun-toggle", children: [
+          /* @__PURE__ */ jsx(
+            "input",
+            {
+              id: autoRunId,
+              type: "checkbox",
+              checked: autoExecute,
+              onChange: (e) => setAutoExecute(e.target.checked)
+            }
+          ),
+          /* @__PURE__ */ jsx("span", { children: "Auto-apply fixes" })
+        ] }),
+        /* @__PURE__ */ jsxs("div", { style: { display: "inline-flex", alignItems: "center", gap: 8 }, children: [
+          /* @__PURE__ */ jsx("span", { className: "ai-token-hint", children: superAccess ? "Super Access" : `${CREDIT_COSTS.ai_chat} tok/msg` }),
+          mode === "page" ? /* @__PURE__ */ jsx("a", { href: "#token-calculator", className: "ai-calc-jump-link", children: "🧮 Calculator & Pricing" }) : /* @__PURE__ */ jsx(
+            Link,
+            {
+              to: "/app/ai-mode#token-calculator",
+              className: "ai-calc-jump-link",
+              onClick: () => typeof onClose === "function" && onClose(),
+              children: "🧮 Calculator"
+            }
+          )
+        ] })
+      ] })
+    ] }),
+    !aiReady ? /* @__PURE__ */ jsxs("div", { className: "ai-chat-banner-error", children: [
+      /* @__PURE__ */ jsx("strong", { children: "AI Chat Unavailable:" }),
+      " ",
+      aiUnavailableReason || "Gemini AI is disabled or not configured in SuperAdmin.",
+      " (Deterministic Quick Actions still work below.)"
+    ] }) : null,
+    /* @__PURE__ */ jsxs("div", { className: `ai-command-body ${mode === "page" && showQuickSidebar ? "with-sidebar" : "single-col"}`, children: [
+      mode === "page" && showQuickSidebar ? /* @__PURE__ */ jsx("aside", { className: "ai-quick-sidebar", "aria-label": "Quick target and fast SEO actions", children: renderQuickControlContent() }) : null,
+      /* @__PURE__ */ jsxs("div", { className: "ai-chat-main-col", children: [
+        mode === "drawer" && showDrawerQuickBar ? /* @__PURE__ */ jsx("div", { className: "ai-drawer-quick-bar", children: renderQuickControlContent() }) : null,
+        /* @__PURE__ */ jsxs("div", { ref: messagesContainerRef, className: "ai-chat-messages", role: "log", "aria-label": "AI Mode conversation and live reports", children: [
+          messages.length === 0 && !pendingUserPrompt ? /* @__PURE__ */ jsxs("div", { className: "ai-chat-empty", children: [
+            /* @__PURE__ */ jsx("div", { className: "ai-chat-empty-badge", children: "✨ All-In-One Store Copilot" }),
+            /* @__PURE__ */ jsx("h3", { children: "Tell me what to update, or pick a 1-click Fast Action" }),
+            /* @__PURE__ */ jsx("p", { className: "seo-muted", children: scan ? `Store Audit: ${scan.healthScore}/100 across ${scan.pagesScanned} pages (${scan.criticalCount} critical issues, ${scan.missingAltCount || 0} missing ALT). Select a product on the quick bar or type a command to update Shopify live and receive a Before → After report right here.` : "Select any product, run a full SEO scan, fix titles/meta/handles, optimize images, or update robots.txt & sitemap—every change returns a live Before → After report directly in chat." }),
+            /* @__PURE__ */ jsx("div", { className: "ai-starter-grid", children: STARTER_PROMPTS.map((prompt) => /* @__PURE__ */ jsxs(
+              "button",
+              {
+                type: "button",
+                className: "ai-starter-chip",
+                disabled: !aiReady || isSending || isExecuting,
+                onClick: () => sendPrompt(prompt),
+                children: [
+                  /* @__PURE__ */ jsx("span", { children: prompt }),
+                  /* @__PURE__ */ jsx("span", { "aria-hidden": "true", children: "→" })
+                ]
+              },
+              prompt
+            )) })
+          ] }) : /* @__PURE__ */ jsxs(Fragment, { children: [
+            messages.map((msg, idx) => {
+              var _a3, _b;
+              const isUser = msg.role === "user";
+              const isLatestAssistant = !isUser && idx === latestAssistantIndex;
+              const report = ((_a3 = msg.actionResult) == null ? void 0 : _a3.liveReport) || null;
+              const deltaBadge = formatScoreDelta(report);
+              return /* @__PURE__ */ jsx(
+                "article",
+                {
+                  className: `ai-bubble-row ${isUser ? "user" : "assistant"}`,
+                  children: /* @__PURE__ */ jsxs("div", { className: `ai-bubble ${isUser ? "ai-bubble-user" : "ai-bubble-assistant"}`, children: [
+                    /* @__PURE__ */ jsxs("div", { className: "ai-bubble-meta", children: [
+                      /* @__PURE__ */ jsx("span", { children: isUser ? "You" : "EcomSEO AI Copilot" }),
+                      !isUser && msg.fallbackUsed ? /* @__PURE__ */ jsx("span", { className: "ai-fallback-pill", children: "Offline Snapshot · 0 tok" }) : null
+                    ] }),
+                    /* @__PURE__ */ jsx("div", { className: "ai-bubble-text", children: renderLines(msg.content) }),
+                    msg.actionResult ? /* @__PURE__ */ jsxs("div", { className: `ai-exec-card ${msg.actionResult.ok ? "ok" : "error"}`, children: [
+                      /* @__PURE__ */ jsxs("div", { className: "ai-exec-head", children: [
+                        /* @__PURE__ */ jsxs("strong", { children: [
+                          msg.actionResult.ok ? "✅" : "⚠️",
+                          " ",
+                          msg.actionResult.title || msg.actionResult.actionType
+                        ] }),
+                        /* @__PURE__ */ jsxs("div", { className: "ai-exec-badges", children: [
+                          deltaBadge ? /* @__PURE__ */ jsx("span", { className: `ai-score-delta-pill ${deltaBadge.tone}`, children: deltaBadge.text }) : null,
+                          ((_b = msg.actionResult.creditInfo) == null ? void 0 : _b.creditsDeducted) > 0 ? /* @__PURE__ */ jsxs("span", { className: "ai-credit-note", children: [
+                            "-",
+                            msg.actionResult.creditInfo.creditsDeducted,
+                            " tok"
+                          ] }) : /* @__PURE__ */ jsx("span", { className: "ai-credit-note", children: "Live Synced" })
+                        ] })
+                      ] }),
+                      Array.isArray(report == null ? void 0 : report.diffs) && report.diffs.length > 0 ? /* @__PURE__ */ jsx("div", { className: "ai-live-diff-wrap", children: /* @__PURE__ */ jsxs("table", { className: "ai-live-diff-table", children: [
+                        /* @__PURE__ */ jsx("caption", { className: "visually-hidden", children: "Live Before and After Update Report" }),
+                        /* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsxs("tr", { children: [
+                          /* @__PURE__ */ jsx("th", { scope: "col", children: "Field / Metric" }),
+                          /* @__PURE__ */ jsx("th", { scope: "col", children: "Before" }),
+                          /* @__PURE__ */ jsx("th", { scope: "col", children: "After (Live)" })
+                        ] }) }),
+                        /* @__PURE__ */ jsx("tbody", { children: report.diffs.map((diff, dIdx) => /* @__PURE__ */ jsxs("tr", { children: [
+                          /* @__PURE__ */ jsx("td", { children: /* @__PURE__ */ jsx("strong", { children: diff.label }) }),
+                          /* @__PURE__ */ jsx("td", { className: "ai-diff-before", children: diff.before }),
+                          /* @__PURE__ */ jsx("td", { className: "ai-diff-after", children: diff.after })
+                        ] }, `${dIdx}-${diff.label}`)) })
+                      ] }) }) : Array.isArray(msg.actionResult.details) && msg.actionResult.details.length > 0 ? /* @__PURE__ */ jsx("ul", { className: "ai-exec-details", children: msg.actionResult.details.map((line, lineIdx) => /* @__PURE__ */ jsx("li", { children: line }, `${lineIdx}-${String(line).slice(0, 12)}`)) }) : null,
+                      (report == null ? void 0 : report.rollbackRevisionId) ? /* @__PURE__ */ jsxs("div", { className: "ai-exec-footer-actions", children: [
+                        /* @__PURE__ */ jsx(
+                          "button",
+                          {
+                            type: "button",
+                            className: "seo-button ghost",
+                            style: { padding: "4px 9px", fontSize: "11.5px" },
+                            disabled: isExecuting || isSending,
+                            onClick: () => runAction({
+                              id: `undo-${report.rollbackRevisionId}`,
+                              type: "ROLLBACK_REVISION",
+                              label: "Undo This Update",
+                              params: { revisionId: report.rollbackRevisionId }
+                            }),
+                            children: "↩️ Undo This Change"
+                          }
+                        ),
+                        /* @__PURE__ */ jsx(
+                          Link,
+                          {
+                            to: "/app/revisions",
+                            className: "seo-button ghost",
+                            style: { padding: "4px 9px", fontSize: "11.5px" },
+                            onClick: () => mode === "drawer" && typeof onClose === "function" && onClose(),
+                            children: "View Full History →"
+                          }
+                        )
+                      ] }) : null
+                    ] }) : null,
+                    Array.isArray(msg.suggestedActions) && msg.suggestedActions.length > 0 ? /* @__PURE__ */ jsx("div", { className: "ai-actions-list", children: msg.suggestedActions.map((act) => {
+                      var _a4;
+                      const completed = (_a4 = msg.executedActions) == null ? void 0 : _a4[act.id];
+                      const runningThis = isExecuting && (executingAction == null ? void 0 : executingAction.id) === act.id;
+                      return /* @__PURE__ */ jsxs("div", { className: "ai-action-card", children: [
+                        /* @__PURE__ */ jsxs("div", { className: "ai-action-info", children: [
+                          /* @__PURE__ */ jsxs("div", { className: "ai-action-title-line", children: [
+                            /* @__PURE__ */ jsxs("strong", { children: [
+                              actionIcon(act.type),
+                              " ",
+                              act.label
+                            ] }),
+                            /* @__PURE__ */ jsx("span", { className: "ai-action-cost", children: formatActionCost(act, superAccess, selectedProduct) })
+                          ] }),
+                          act.description ? /* @__PURE__ */ jsx("p", { className: "ai-action-desc", children: act.description }) : null
+                        ] }),
+                        /* @__PURE__ */ jsx(
+                          "button",
+                          {
+                            type: "button",
+                            className: `seo-button ${completed ? "secondary" : act.tone === "secondary" ? "secondary" : ""} ai-action-run-btn`,
+                            disabled: Boolean(completed) || isExecuting || isSending,
+                            onClick: () => runAction(act, msg.id),
+                            children: runningThis ? "Applying..." : completed ? completed.ok ? "✓ Applied" : "Retried" : act.type === "OPEN_ROUTE" ? "Open ↗" : "Apply Live Fix"
+                          }
+                        )
+                      ] }, act.id);
+                    }) }) : null,
+                    isLatestAssistant && Array.isArray(msg.quickReplies) && msg.quickReplies.length > 0 ? /* @__PURE__ */ jsx("div", { className: "ai-quick-replies", children: msg.quickReplies.map((replyText) => /* @__PURE__ */ jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: "ai-quick-chip",
+                        disabled: !aiReady || isSending || isExecuting,
+                        onClick: () => sendPrompt(replyText),
+                        children: replyText
+                      },
+                      replyText
+                    )) }) : null
+                  ] })
+                },
+                msg.id || `${idx}-${msg.role}`
+              );
+            }),
+            pendingUserPrompt ? /* @__PURE__ */ jsx("article", { className: "ai-bubble-row user", children: /* @__PURE__ */ jsxs("div", { className: "ai-bubble ai-bubble-user", children: [
+              /* @__PURE__ */ jsx("div", { className: "ai-bubble-meta", children: /* @__PURE__ */ jsx("span", { children: "You" }) }),
+              /* @__PURE__ */ jsx("div", { className: "ai-bubble-text", children: pendingUserPrompt })
+            ] }) }) : null,
+            isSending ? /* @__PURE__ */ jsx("article", { className: "ai-bubble-row assistant", "aria-label": "AI is thinking", children: /* @__PURE__ */ jsxs("div", { className: "ai-bubble ai-bubble-assistant ai-thinking-bubble", children: [
+              /* @__PURE__ */ jsxs("div", { className: "ai-bubble-meta", children: [
+                /* @__PURE__ */ jsx("span", { children: "EcomSEO AI Copilot" }),
+                /* @__PURE__ */ jsx("span", { className: "ai-thinking-label", children: "thinking…" })
+              ] }),
+              /* @__PURE__ */ jsxs("div", { className: "ai-typing-row", children: [
+                /* @__PURE__ */ jsx("span", { className: "ai-typing-dot", style: { animationDelay: "0ms" } }),
+                /* @__PURE__ */ jsx("span", { className: "ai-typing-dot", style: { animationDelay: "160ms" } }),
+                /* @__PURE__ */ jsx("span", { className: "ai-typing-dot", style: { animationDelay: "320ms" } })
+              ] }),
+              /* @__PURE__ */ jsxs("div", { className: "ai-thinking-steps", children: [
+                /* @__PURE__ */ jsx("span", { className: "ai-thinking-step active", children: "📋 Reading store audit & SEO state" }),
+                /* @__PURE__ */ jsx("span", { className: "ai-thinking-step", children: "🧠 Generating AI response" }),
+                /* @__PURE__ */ jsx("span", { className: "ai-thinking-step", children: "⚡ Preparing action plan" })
+              ] })
+            ] }) }) : null,
+            isExecuting ? /* @__PURE__ */ jsx("article", { className: "ai-bubble-row assistant", "aria-label": "Applying fix to store", children: /* @__PURE__ */ jsxs("div", { className: "ai-bubble ai-bubble-assistant ai-executing-bubble", children: [
+              /* @__PURE__ */ jsxs("div", { className: "ai-bubble-meta", children: [
+                /* @__PURE__ */ jsx("span", { children: "EcomSEO AI Copilot" }),
+                /* @__PURE__ */ jsx("span", { className: "ai-executing-label", children: "executing…" })
+              ] }),
+              /* @__PURE__ */ jsxs("div", { className: "ai-exec-progress-title", children: [
+                /* @__PURE__ */ jsx("span", { className: "ai-exec-spinner", "aria-hidden": "true" }),
+                /* @__PURE__ */ jsx("strong", { children: (executingAction == null ? void 0 : executingAction.label) || "Applying Live Store Update" }),
+                (executingAction == null ? void 0 : executingAction.badgeLabel) ? /* @__PURE__ */ jsxs("span", { className: "ai-exec-token-pill", children: [
+                  "Est. ",
+                  executingAction.badgeLabel
+                ] }) : null
+              ] }),
+              /* @__PURE__ */ jsxs("ol", { className: "ai-exec-steps-list", children: [
+                /* @__PURE__ */ jsx("li", { className: "done", children: "🔗 Connected to Shopify Admin API" }),
+                /* @__PURE__ */ jsx("li", { className: "active", children: "✏️ Writing SEO updates to Shopify…" }),
+                /* @__PURE__ */ jsx("li", { children: "📊 Refreshing live Before → After report" })
+              ] })
+            ] }) }) : null
+          ] }),
+          /* @__PURE__ */ jsx("div", { "aria-hidden": "true", style: { height: 0 } })
+        ] }),
+        /* @__PURE__ */ jsx("div", { className: "visually-hidden", "aria-live": "polite", "aria-atomic": "true", children: liveStatus }),
+        pendingConfirmAction ? /* @__PURE__ */ jsxs("div", { className: "ai-confirm-card", role: "region", "aria-label": "Pre-run token calculation", children: [
+          /* @__PURE__ */ jsxs("div", { className: "ai-confirm-head", children: [
+            /* @__PURE__ */ jsxs("div", { children: [
+              /* @__PURE__ */ jsxs("strong", { children: [
+                "🧮 Calculated Token Cost: ",
+                pendingConfirmAction.estimate.badgeLabel
+              ] }),
+              /* @__PURE__ */ jsxs("p", { children: [
+                "Action: ",
+                /* @__PURE__ */ jsx("strong", { children: pendingConfirmAction.action.label || pendingConfirmAction.action.type }),
+                pendingConfirmAction.estimate.scopeNote ? ` · ${pendingConfirmAction.estimate.scopeNote}` : ""
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxs("div", { className: "ai-confirm-balance", children: [
+              /* @__PURE__ */ jsxs("span", { children: [
+                "Balance: ",
+                /* @__PURE__ */ jsxs("strong", { children: [
+                  availableTokens.toLocaleString(),
+                  " tok"
+                ] })
+              ] }),
+              /* @__PURE__ */ jsxs("span", { children: [
+                "After:",
+                " ",
+                /* @__PURE__ */ jsx(
+                  "strong",
+                  {
+                    className: availableTokens >= pendingConfirmAction.estimate.estimatedTokens ? "token-status-ok" : "token-status-warn",
+                    children: availableTokens >= pendingConfirmAction.estimate.estimatedTokens ? `${(availableTokens - pendingConfirmAction.estimate.estimatedTokens).toLocaleString()} tok` : `Short ${pendingConfirmAction.estimate.estimatedTokens - availableTokens} tok`
+                  }
+                )
+              ] })
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxs("div", { className: "ai-confirm-actions", children: [
+            /* @__PURE__ */ jsxs(
+              "button",
+              {
+                type: "button",
+                className: "seo-button",
+                disabled: isExecuting || isSending,
+                onClick: () => runAction(
+                  pendingConfirmAction.action,
+                  pendingConfirmAction.messageId,
+                  { skipConfirm: true }
+                ),
+                children: [
+                  "Confirm & Run (Up to ",
+                  pendingConfirmAction.estimate.estimatedTokens,
+                  " tok)"
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                type: "button",
+                className: "seo-button secondary",
+                onClick: () => setPendingConfirmAction(null),
+                children: "Cancel"
+              }
+            ),
+            availableTokens < pendingConfirmAction.estimate.estimatedTokens ? /* @__PURE__ */ jsx(
+              Link,
+              {
+                to: "/app/billing",
+                className: "ai-calc-jump-link",
+                onClick: () => mode === "drawer" && typeof onClose === "function" && onClose(),
+                children: "Top Up Tokens →"
+              }
+            ) : null
+          ] })
+        ] }) : null,
+        /* @__PURE__ */ jsx("div", { className: "ai-composer-quick-strip", "aria-label": "Fast chat shortcuts", children: QUICK_FAST_COMMANDS.slice(0, 5).map((cmd) => {
+          const est = estimateChatActionTokens(
+            { type: cmd.type, params: cmd.params },
+            { superAccess, selectedProduct }
+          );
+          const isAiCmd = cmd.type === "AUTO_FIX_PRODUCTS" || cmd.type === "FIX_PRODUCT_DESCRIPTION";
+          return /* @__PURE__ */ jsxs(
+            "button",
+            {
+              type: "button",
+              className: "ai-strip-chip",
+              disabled: isExecuting || isSending || isAiCmd && !aiReady,
+              onClick: () => runQuickCommand(cmd),
+              title: est.badgeLabel,
+              children: [
+                /* @__PURE__ */ jsx("span", { "aria-hidden": "true", children: cmd.icon }),
+                /* @__PURE__ */ jsx("span", { children: (cmd.type === "AUTO_FIX_PRODUCTS" || cmd.type === "FIX_PRODUCT_DESCRIPTION") && selectedProduct ? `${cmd.type === "FIX_PRODUCT_DESCRIPTION" ? "Desc" : "Fix"} ${selectedProduct.title.slice(0, 14)}` : cmd.label }),
+                est.estimatedTokens > 0 ? /* @__PURE__ */ jsxs("span", { className: "ai-chip-tok", children: [
+                  est.unitCost,
+                  "t"
+                ] }) : null
+              ]
+            },
+            `strip-${cmd.id}`
+          );
+        }) }),
+        /* @__PURE__ */ jsxs("form", { className: "ai-chat-composer", onSubmit: handleFormSubmit, children: [
+          /* @__PURE__ */ jsx("label", { htmlFor: inputId, className: "visually-hidden", children: "Message EcomSEO AI Mode" }),
+          /* @__PURE__ */ jsxs("div", { className: "ai-composer-box", children: [
+            /* @__PURE__ */ jsx(
+              "textarea",
+              {
+                ref: textareaRef,
+                id: inputId,
+                className: "ai-composer-input",
+                rows: 2,
+                value: draft,
+                onChange: (e) => setDraft(e.target.value),
+                onKeyDown: handleKeyDown,
+                "aria-describedby": hintId,
+                placeholder: selectedProduct ? `Command AI for "${selectedProduct.title}" (e.g. 'set meta title to ...' or 'auto-fix this product')...` : aiReady ? "Tell AI what to update (e.g. 'update product SEO for ...', 'compress heavy images', 'set robots.txt', 'run speed test')..." : "Use Fast One-Click Actions above, or enable Gemini AI in SuperAdmin for chat prompts.",
+                disabled: !aiReady || isSending || isExecuting
+              }
+            ),
+            /* @__PURE__ */ jsx(
+              "button",
+              {
+                type: "submit",
+                className: "seo-button ai-composer-send",
+                disabled: !aiReady || !draft.trim() || isSending || isExecuting,
+                children: isSending ? "..." : "Send"
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsx("div", { className: "ai-composer-foot", children: /* @__PURE__ */ jsxs("span", { id: hintId, className: "seo-muted", children: [
+            "Press ",
+            /* @__PURE__ */ jsx("kbd", { children: "Enter" }),
+            " to send · ",
+            /* @__PURE__ */ jsx("kbd", { children: "Shift" }),
+            "+",
+            /* @__PURE__ */ jsx("kbd", { children: "Enter" }),
+            " for new line"
+          ] }) })
+        ] })
+      ] })
+    ] })
+  ] });
+}
+function AiChatDrawer({
+  open = false,
+  onClose,
+  initialHistory = [],
+  initialSnapshot = null,
+  initialCatalogProducts = [],
+  aiReady = true,
+  aiUnavailableReason = "",
+  creditAccount = {}
+}) {
+  const dialogRef = useRef(null);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (open) {
+      if (!dialog.open) {
+        try {
+          dialog.showModal();
+        } catch {
+          dialog.setAttribute("open", "true");
+        }
+      }
+    } else if (dialog.open) {
+      dialog.close();
+    }
+  }, [open]);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return void 0;
+    const handleClose = () => {
+      dialog.returnValue = "";
+      if (typeof onClose === "function") onClose();
+    };
+    dialog.addEventListener("close", handleClose);
+    if ("closedBy" in HTMLDialogElement.prototype) {
+      return () => dialog.removeEventListener("close", handleClose);
+    }
+    let pressedOutside = false;
+    const isOutside = (event) => {
+      const r = dialog.getBoundingClientRect();
+      return event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom;
+    };
+    const handlePointerDown = (event) => {
+      pressedOutside = isOutside(event);
+    };
+    const handlePointerUp = (event) => {
+      if (pressedOutside && isOutside(event) && dialog.open) {
+        dialog.close();
+      }
+      pressedOutside = false;
+    };
+    dialog.addEventListener("pointerdown", handlePointerDown);
+    dialog.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      dialog.removeEventListener("close", handleClose);
+      dialog.removeEventListener("pointerdown", handlePointerDown);
+      dialog.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [onClose]);
+  return /* @__PURE__ */ jsx(
+    "dialog",
+    {
+      ref: dialogRef,
+      className: `ai-drawer-dialog${expanded ? " expanded" : ""}`,
+      "aria-label": "Full AI Mode Chat Copilot",
+      ...{ closedby: "any" },
+      children: /* @__PURE__ */ jsx(
+        AiChatPanel,
+        {
+          mode: "drawer",
+          open,
+          initialHistory,
+          initialSnapshot,
+          initialCatalogProducts,
+          aiReady,
+          aiUnavailableReason,
+          creditAccount,
+          onClose,
+          isDrawerExpanded: expanded,
+          onToggleDrawerExpand: () => setExpanded((prev) => !prev)
+        }
+      )
+    }
+  );
+}
+function aiHandleSuggestion({ title, currentHandle, focusKeyword }) {
+  const base = `${focusKeyword || ""} ${title || ""}`.trim() || currentHandle || "product";
+  return {
+    handle: normalizeHandle(base),
+    rationale: "Generated a lowercase, hyphenated handle from product intent keywords."
+  };
+}
+function aiRobotsImprovement({ currentRules }) {
+  const lines = String(currentRules || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const ensured = new Set(lines);
+  ensured.add("User-agent: *");
+  ensured.add("Disallow: /cart");
+  ensured.add("Disallow: /search");
+  ensured.add("Allow: /");
+  return {
+    robotsTxt: Array.from(ensured).join("\n"),
+    rationale: "Added required disallow rules while preserving broad crawl access for public pages."
+  };
+}
+const PAGESPEED_ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed";
+const AUDIT_GUIDANCE = Object.freeze({
+  "largest-contentful-paint-element": {
+    metricTarget: "LCP",
+    fixMode: "THEME_MANUAL",
+    inAppTarget: "",
+    fileHint: "sections/main-product.liquid or layout/theme.liquid",
+    title: "Preload & prioritize LCP hero image",
+    steps: 'Add fetchpriority="high" on your primary above-the-fold hero/product image and remove loading="lazy" from the first visible image.',
+    snippet: `<link rel="preload" as="image" href="{{ product.featured_image | image_url: width: 1200 }}" fetchpriority="high">
+{{ product.featured_image | image_url: width: 1200 | image_tag: fetchpriority: 'high', loading: 'eager', widths: '400, 800, 1200' }}`
+  },
+  "render-blocking-resources": {
+    metricTarget: "FCP / LCP",
+    fixMode: "THEME_MANUAL",
+    inAppTarget: "",
+    fileHint: "layout/theme.liquid",
+    title: "Defer non-critical CSS and render-blocking scripts",
+    steps: "Move non-essential scripts to defer or async, and inline tiny critical above-the-fold styles in layout/theme.liquid.",
+    snippet: `<!-- Non-blocking script & stylesheet loading in layout/theme.liquid -->
+<script src="{{ 'theme.js' | asset_url }}" defer><\/script>
+<link rel="stylesheet" href="{{ 'custom-extra.css' | asset_url }}" media="print" onload="this.media='all'">`
+  },
+  "unused-javascript": {
+    metricTarget: "INP / TBT",
+    fixMode: "APP_BLOAT",
+    inAppTarget: "",
+    fileHint: "Online Store → Themes → Customize → App embeds",
+    title: "Trim heavy or unused third-party app JavaScript",
+    steps: "Disable unused Shopify App Embeds in Theme Customizer and uninstall leftover app script tags injected into theme.liquid.",
+    snippet: `{%- comment -%} Load heavy widgets only on pages that need them {%- endcomment -%}
+{% if template.name == 'product' %}
+  {{ 'product-widget.js' | asset_url | script_tag }}
+{% endif %}`
+  },
+  "bootup-time": {
+    metricTarget: "INP / TBT",
+    fixMode: "APP_BLOAT",
+    inAppTarget: "",
+    fileHint: "Online Store → Themes → Customize → App embeds",
+    title: "Reduce JavaScript execution & main-thread blocking",
+    steps: "Audit the heavy script URLs below. Disable redundant chat widgets, popups, or duplicate tracking pixels firing on initial page load.",
+    snippet: `<!-- Delay non-essential analytics/widgets until user interaction -->
+<script>
+  window.addEventListener('pointerdown', function loadDeferred() {
+    // initialize non-critical widget here
+  }, { once: true, passive: true });
+<\/script>`
+  },
+  "third-party-summary": {
+    metricTarget: "INP / LCP",
+    fixMode: "APP_BLOAT",
+    inAppTarget: "",
+    fileHint: "Shopify Admin → Settings → Customer events / Theme App Embeds",
+    title: "Consolidate heavy third-party Shopify scripts",
+    steps: "Review third-party script execution costs below. Consolidate pixels into Shopify Web Pixels and disable unused theme app embeds.",
+    snippet: ""
+  },
+  "uses-optimized-images": {
+    metricTarget: "LCP",
+    fixMode: "IN_APP_AUTO",
+    inAppTarget: "/app/image-optimizer?tab=compression",
+    fileHint: "Image Compression + Shopify Liquid image_url filter",
+    title: "Compress oversized images & use modern width/format",
+    steps: "Compress oversized product images in Image Compression (0 AI tokens) and ensure Liquid templates render responsive Shopify CDN sizes via image_url + image_tag.",
+    snippet: `{{ image | image_url: width: 1000 | image_tag: widths: '360, 540, 720, 1000', sizes: '(min-width: 990px) 50vw, 100vw', loading: 'lazy' }}`
+  },
+  "modern-image-formats": {
+    metricTarget: "LCP",
+    fixMode: "IN_APP_AUTO",
+    inAppTarget: "/app/image-optimizer?tab=compression",
+    fileHint: "Image Compression (WebP / Smart) & Sections / Snippets",
+    title: "Serve WebP/AVIF & convert bloated legacy PNGs",
+    steps: "Run Image Compression with WebP or Smart PageSpeed format, and replace hardcoded img URLs with Shopify's image_url filter.",
+    snippet: `{{ product.featured_image | image_url: width: 900 | image_tag: loading: 'eager', decoding: 'async' }}`
+  },
+  "uses-responsive-images": {
+    metricTarget: "LCP",
+    fixMode: "IN_APP_AUTO",
+    inAppTarget: "/app/image-optimizer?tab=compression",
+    fileHint: "Image Compression + Sections / Snippets rendering product cards",
+    title: "Cap oversized source pixels & deliver responsive srcset widths",
+    steps: "Cap 3000px+ source uploads to 1600-2048px inside Image Compression and add responsive widths and sizes attributes in Liquid.",
+    snippet: `{{ card_product.featured_media | image_url: width: 720 | image_tag: widths: '240, 360, 540, 720', sizes: '(max-width: 749px) 50vw, 25vw', loading: 'lazy' }}`
+  },
+  "offscreen-images": {
+    metricTarget: "LCP / Bandwidth",
+    fixMode: "THEME_MANUAL",
+    inAppTarget: "",
+    fileHint: "Collection grid / footer snippets",
+    title: "Lazy-load below-the-fold product cards and footer media",
+    steps: 'Add loading="lazy" on collection grid images below row 1, related products, and footer badges.',
+    snippet: `{{ block.settings.image | image_url: width: 800 | image_tag: loading: 'lazy', decoding: 'async' }}`
+  },
+  "unsized-images": {
+    metricTarget: "CLS",
+    fixMode: "THEME_MANUAL",
+    inAppTarget: "",
+    fileHint: "Theme CSS / Product card & banner templates",
+    title: "Reserve explicit width & height to stop layout shifts (CLS)",
+    steps: "Ensure every <img> specifies explicit width and height HTML attributes (Shopify's image_tag adds them automatically) or CSS aspect-ratio.",
+    snippet: `<img src="{{ img | image_url: width: 800 }}" width="{{ img.width }}" height="{{ img.height }}" alt="{{ img.alt | escape }}" style="height:auto;">`
+  },
+  "layout-shift-elements": {
+    metricTarget: "CLS",
+    fixMode: "THEME_MANUAL",
+    inAppTarget: "",
+    fileHint: "Announcement bar / sticky app banners",
+    title: "Stabilize dynamic announcement bars, reviews, and media heights",
+    steps: "Set a fixed min-height on review star badges, announcement banners, and variant swatches so content below does not jump after hydration.",
+    snippet: `.product-reviews-badge, .announcement-slot {
+  min-height: 28px;
+}`
+  },
+  "font-display": {
+    metricTarget: "FCP / CLS",
+    fixMode: "THEME_MANUAL",
+    inAppTarget: "",
+    fileHint: "layout/theme.liquid / assets/*.css",
+    title: "Prevent invisible text flash with font-display: swap",
+    steps: "Add &display=swap to external font imports and font-display: swap inside @font-face declarations.",
+    snippet: `@font-face {
+  font-family: 'CustomBrandFont';
+  font-display: swap;
+}`
+  },
+  "meta-description": {
+    metricTarget: "SEO",
+    fixMode: "IN_APP_AUTO",
+    inAppTarget: "/app/bulk-meta",
+    fileHint: "Bulk Meta Editor / Product SEO",
+    title: "Add compelling meta description for higher Google CTR",
+    steps: "Fix the missing meta description directly using the Manual/AI editor below or across your entire catalog in Bulk Meta.",
+    snippet: ""
+  },
+  "document-title": {
+    metricTarget: "SEO",
+    fixMode: "IN_APP_AUTO",
+    inAppTarget: "/app/products",
+    fileHint: "Product SEO Editor / Online Store Preferences",
+    title: "Ensure page has a unique, keyword-rich <title> tag",
+    steps: "Set a clear 50-60 character SEO title in Shopify Preferences (for homepage) or Product SEO Editor (for products).",
+    snippet: ""
+  },
+  "image-alt": {
+    metricTarget: "SEO / Accessibility",
+    fixMode: "IN_APP_AUTO",
+    inAppTarget: "/app/image-optimizer?status=needs-fix",
+    fileHint: "Image Optimizer & Gemini Vision ALT",
+    title: "Fix missing product and theme image ALT text",
+    steps: "Open Image Optimizer to auto-generate descriptive WCAG/SEO ALT tags using Gemini Vision AI or manual bulk edit.",
+    snippet: ""
+  },
+  "robots-txt": {
+    metricTarget: "SEO Crawl",
+    fixMode: "IN_APP_AUTO",
+    inAppTarget: "/app/robots",
+    fileHint: "Technical & History → Robots.txt",
+    title: "Fix invalid or blocking robots.txt rules",
+    steps: "Validate and clean your Shopify templates/robots.txt.liquid directives inside the Robots.txt manager.",
+    snippet: ""
+  },
+  "is-crawlable": {
+    metricTarget: "SEO Crawl",
+    fixMode: "IN_APP_AUTO",
+    inAppTarget: "/app/robots",
+    fileHint: "Robots.txt / Theme meta robots",
+    title: "Ensure public storefront pages are indexable (remove accidental noindex)",
+    steps: "Check theme.liquid for unintended noindex meta tags and verify Password Protection is turned off for live stores.",
+    snippet: ""
+  }
+});
+function isPrivateOrLocalHostname(hostname) {
+  const host = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host) return true;
+  if (host === "localhost" || host === "0.0.0.0" || host === "::1" || host.endsWith(".local") || host.endsWith(".internal")) {
+    return true;
+  }
+  const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const [, a, b] = ipv4Match.map(Number);
+    if (a === 10 || a === 127 || a === 0) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+  }
+  return false;
+}
+function normalizePageSpeedTargetUrl(shop, inputUrl = "") {
+  const cleanShop = String(shop || "").trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+  const fallbackBase = cleanShop ? `https://${cleanShop}` : "";
+  const raw = String(inputUrl || "").trim();
+  if (!raw) {
+    if (!fallbackBase) throw new Error("Store domain or target URL is required.");
+    return new URL(fallbackBase).toString();
+  }
+  let candidate = raw;
+  if (raw.startsWith("/")) {
+    if (!fallbackBase) throw new Error("Store domain is required for relative storefront paths.");
+    candidate = `${fallbackBase}${raw}`;
+  } else if (!/^https?:\/\//i.test(raw)) {
+    candidate = `https://${raw}`;
+  }
+  let parsed;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw new Error("Enter a valid public URL or storefront path (e.g. /products/example).");
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("Only HTTP/HTTPS URLs can be tested with Google PageSpeed Insights.");
+  }
+  if (isPrivateOrLocalHostname(parsed.hostname) || !parsed.hostname.includes(".")) {
+    throw new Error("Google PageSpeed Insights can only test public internet URLs.");
+  }
+  parsed.hash = "";
+  return parsed.toString();
+}
+function extractProductHandleFromUrl(targetUrl) {
+  try {
+    const parsed = new URL(String(targetUrl || "").trim());
+    const match = parsed.pathname.match(/\/products\/([^/?#]+)/i);
+    return match ? decodeURIComponent(match[1]).toLowerCase() : "";
+  } catch {
+    return "";
+  }
+}
+function roundScore(categoryScore) {
+  if (typeof categoryScore !== "number" || !Number.isFinite(categoryScore)) return null;
+  return Math.max(0, Math.min(100, Math.round(categoryScore * 100)));
+}
+function rateMetric(value, goodMax, poorMin) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "unknown";
+  if (value <= goodMax) return "good";
+  if (value <= poorMin) return "needs-improvement";
+  return "poor";
+}
+function formatMs(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "N/A";
+  if (ms >= 1e3) return `${(ms / 1e3).toFixed(2)} s`;
+  return `${Math.round(ms)} ms`;
+}
+function formatBytes(bytes) {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  return `${Math.round(bytes / 1024)} KB`;
+}
+function mapAuditItems(audit) {
+  const details = audit == null ? void 0 : audit.details;
+  const rows = Array.isArray(details == null ? void 0 : details.items) ? details.items : [];
+  return rows.slice(0, 5).map((item) => {
+    var _a2, _b, _c;
+    const url = String(
+      (item == null ? void 0 : item.url) || (item == null ? void 0 : item.entity) || ((_a2 = item == null ? void 0 : item.node) == null ? void 0 : _a2.snippet) || ((_b = item == null ? void 0 : item.source) == null ? void 0 : _b.url) || ""
+    ).trim();
+    const label2 = String(((_c = item == null ? void 0 : item.node) == null ? void 0 : _c.nodeLabel) || (item == null ? void 0 : item.entity) || "").trim();
+    const wastedMs = typeof (item == null ? void 0 : item.wastedMs) === "number" ? Math.round(item.wastedMs) : null;
+    const blockingTime = typeof (item == null ? void 0 : item.blockingTime) === "number" ? Math.round(item.blockingTime) : null;
+    const wastedBytes = typeof (item == null ? void 0 : item.wastedBytes) === "number" ? Math.round(item.wastedBytes) : typeof (item == null ? void 0 : item.totalBytes) === "number" ? Math.round(item.totalBytes) : null;
+    return {
+      url: url.slice(0, 240),
+      label: label2.slice(0, 140),
+      wastedMs: wastedMs ?? blockingTime,
+      wastedBytes
+    };
+  });
+}
+function normalizeDescription(text2) {
+  return String(text2 || "").replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, "$1").replace(/\s+/g, " ").trim();
+}
+function buildManualPageSpeedChecklist(report) {
+  var _a2, _b;
+  const failingIds = new Set(
+    [...(report == null ? void 0 : report.opportunities) || [], ...(report == null ? void 0 : report.seoFindings) || []].filter((item) => item && item.id).map((item) => item.id)
+  );
+  const items = [];
+  for (const audit of [...(report == null ? void 0 : report.opportunities) || [], ...(report == null ? void 0 : report.seoFindings) || []]) {
+    if (!(audit == null ? void 0 : audit.id)) continue;
+    const guide = AUDIT_GUIDANCE[audit.id];
+    items.push({
+      id: `manual_${audit.id}`,
+      auditId: audit.id,
+      title: (guide == null ? void 0 : guide.title) || audit.title,
+      metricTarget: (guide == null ? void 0 : guide.metricTarget) || audit.category || "SEO",
+      fixMode: (guide == null ? void 0 : guide.fixMode) || "THEME_MANUAL",
+      inAppTarget: (guide == null ? void 0 : guide.inAppTarget) || "",
+      fileHint: (guide == null ? void 0 : guide.fileHint) || "Online Store → Themes → Edit code",
+      displayImpact: audit.displayValue || (audit.savingsMs ? `${Math.round(audit.savingsMs)} ms savings` : "Needs fix"),
+      steps: (guide == null ? void 0 : guide.steps) || audit.description,
+      snippet: (guide == null ? void 0 : guide.snippet) || "",
+      offendingItems: Array.isArray(audit.items) ? audit.items : []
+    });
+  }
+  if (!failingIds.has("meta-description") && (((_a2 = report == null ? void 0 : report.scores) == null ? void 0 : _a2.seo) ?? 100) < 100) {
+    items.push({
+      id: "manual_seo_review",
+      auditId: "seo-review",
+      title: "Verify Store & Product Meta Snippets",
+      metricTarget: "SEO",
+      fixMode: "IN_APP_AUTO",
+      inAppTarget: "/app/bulk-meta",
+      fileHint: "Bulk Meta Editor / Product SEO",
+      displayImpact: `SEO Score ${((_b = report == null ? void 0 : report.scores) == null ? void 0 : _b.seo) ?? 0}/100`,
+      steps: "Inspect failing SEO audits and update missing titles, meta descriptions, or ALT text in-app.",
+      snippet: "",
+      offendingItems: []
+    });
+  }
+  return items;
+}
+function parsePageSpeedApiResponse(rawJson, requestedUrl = "", requestedStrategy = "mobile") {
+  var _a2, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C, _D, _E, _F, _G, _H, _I, _J, _K, _L, _M, _N;
+  const lhr = rawJson == null ? void 0 : rawJson.lighthouseResult;
+  if (!lhr || typeof lhr !== "object") {
+    throw new Error("Google PageSpeed Insights returned an incomplete Lighthouse payload.");
+  }
+  const audits = lhr.audits || {};
+  const categories = lhr.categories || {};
+  const fieldMetrics = ((_a2 = rawJson == null ? void 0 : rawJson.loadingExperience) == null ? void 0 : _a2.metrics) || {};
+  const strategy = String(((_b = lhr.configSettings) == null ? void 0 : _b.formFactor) || requestedStrategy || "mobile").toLowerCase();
+  const finalUrl = String(lhr.finalDisplayedUrl || lhr.finalUrl || (rawJson == null ? void 0 : rawJson.id) || requestedUrl);
+  const titleAuditValue = String(
+    ((_f = (_e = (_d = (_c = audits["document-title"]) == null ? void 0 : _c.details) == null ? void 0 : _d.items) == null ? void 0 : _e[0]) == null ? void 0 : _f.title) || ((_g = lhr.fullPageScreenshot) == null ? void 0 : _g.title) || ""
+  );
+  const passwordProtected = /\/password(\?|$|#)/i.test(finalUrl) || /storefront password|enter using password/i.test(titleAuditValue) || ((_h = lhr.runtimeError) == null ? void 0 : _h.code) === "ERRORED_DOCUMENT_REQUEST";
+  const lcpMs = ((_i = audits["largest-contentful-paint"]) == null ? void 0 : _i.numericValue) ?? null;
+  const fcpMs = ((_j = audits["first-contentful-paint"]) == null ? void 0 : _j.numericValue) ?? null;
+  const clsVal = ((_k = audits["cumulative-layout-shift"]) == null ? void 0 : _k.numericValue) ?? null;
+  const tbtMs = ((_l = audits["total-blocking-time"]) == null ? void 0 : _l.numericValue) ?? null;
+  const ttfbMs = ((_m = audits["server-response-time"]) == null ? void 0 : _m.numericValue) ?? null;
+  const siMs = ((_n = audits["speed-index"]) == null ? void 0 : _n.numericValue) ?? null;
+  const fieldInpMs = ((_o = fieldMetrics == null ? void 0 : fieldMetrics.INTERACTION_TO_NEXT_PAINT) == null ? void 0 : _o.percentile) ?? null;
+  const effectiveInpMs = fieldInpMs ?? tbtMs;
+  const lcpElementItem = ((_t = (_s = (_r = (_q = (_p = audits["largest-contentful-paint-element"]) == null ? void 0 : _p.details) == null ? void 0 : _q.items) == null ? void 0 : _r[0]) == null ? void 0 : _s.items) == null ? void 0 : _t[0]) || ((_w = (_v = (_u = audits["largest-contentful-paint-element"]) == null ? void 0 : _u.details) == null ? void 0 : _v.items) == null ? void 0 : _w[0]) || null;
+  const lcpElement = String(
+    ((_x = lcpElementItem == null ? void 0 : lcpElementItem.node) == null ? void 0 : _x.snippet) || ((_y = lcpElementItem == null ? void 0 : lcpElementItem.node) == null ? void 0 : _y.nodeLabel) || ""
+  ).trim().slice(0, 220);
+  const totalBytes = ((_z = audits["total-byte-weight"]) == null ? void 0 : _z.numericValue) ?? null;
+  const candidateAuditIds = Object.keys(audits).filter((id) => {
+    const audit = audits[id];
+    if (!audit || typeof audit.score !== "number") return false;
+    return audit.score < 0.9;
+  });
+  const seoAuditSet = new Set(
+    (((_A = categories.seo) == null ? void 0 : _A.auditRefs) || []).map((ref) => ref.id).filter(Boolean)
+  );
+  const opportunities = [];
+  const seoFindings = [];
+  for (const id of candidateAuditIds) {
+    const audit = audits[id];
+    const isSeo = seoAuditSet.has(id);
+    const guide = AUDIT_GUIDANCE[id];
+    const savingsMs = typeof ((_B = audit.details) == null ? void 0 : _B.overallSavingsMs) === "number" ? Math.round(audit.details.overallSavingsMs) : 0;
+    const savingsBytes = typeof ((_C = audit.details) == null ? void 0 : _C.overallSavingsBytes) === "number" ? Math.round(audit.details.overallSavingsBytes) : 0;
+    if (!isSeo && !guide && savingsMs <= 0 && savingsBytes <= 0 && audit.score >= 0.5) {
+      continue;
+    }
+    const entry2 = {
+      id,
+      title: String(audit.title || id),
+      description: normalizeDescription(audit.description),
+      score: Math.round(audit.score * 100),
+      displayValue: String(audit.displayValue || (savingsMs ? `Est. ${savingsMs} ms savings` : "")),
+      savingsMs,
+      savingsBytes,
+      savingsBytesLabel: formatBytes(savingsBytes),
+      category: isSeo ? "SEO" : (guide == null ? void 0 : guide.metricTarget) || "PERFORMANCE",
+      fixMode: (guide == null ? void 0 : guide.fixMode) || (isSeo ? "IN_APP_AUTO" : "THEME_MANUAL"),
+      inAppTarget: (guide == null ? void 0 : guide.inAppTarget) || "",
+      items: mapAuditItems(audit)
+    };
+    if (isSeo) {
+      seoFindings.push(entry2);
+    } else {
+      opportunities.push(entry2);
+    }
+  }
+  opportunities.sort((a, b) => {
+    const weightA = a.savingsMs + a.savingsBytes / 1e3 + (100 - a.score) * 10;
+    const weightB = b.savingsMs + b.savingsBytes / 1e3 + (100 - b.score) * 10;
+    return weightB - weightA;
+  });
+  seoFindings.sort((a, b) => a.score - b.score);
+  const parsed = {
+    testedUrl: requestedUrl || finalUrl,
+    finalUrl,
+    strategy,
+    fetchTime: lhr.fetchTime || (/* @__PURE__ */ new Date()).toISOString(),
+    runtimeError: ((_D = lhr.runtimeError) == null ? void 0 : _D.message) || "",
+    passwordProtected,
+    hasFieldData: Boolean((fieldMetrics == null ? void 0 : fieldMetrics.LARGEST_CONTENTFUL_PAINT_MS) || (fieldMetrics == null ? void 0 : fieldMetrics.INTERACTION_TO_NEXT_PAINT)),
+    scores: {
+      performance: roundScore((_E = categories.performance) == null ? void 0 : _E.score),
+      seo: roundScore((_F = categories.seo) == null ? void 0 : _F.score),
+      accessibility: roundScore((_G = categories.accessibility) == null ? void 0 : _G.score),
+      bestPractices: roundScore((_H = categories["best-practices"]) == null ? void 0 : _H.score)
+    },
+    metrics: {
+      lcp: {
+        label: "LCP (Largest Contentful Paint)",
+        value: typeof lcpMs === "number" ? Math.round(lcpMs) : null,
+        displayValue: ((_I = audits["largest-contentful-paint"]) == null ? void 0 : _I.displayValue) || formatMs(lcpMs),
+        rating: rateMetric(lcpMs, 2500, 4e3),
+        target: "≤ 2.5 s"
+      },
+      inp: {
+        label: fieldInpMs !== null ? "INP (Real CrUX Field)" : "TBT (INP Lab Proxy)",
+        value: typeof effectiveInpMs === "number" ? Math.round(effectiveInpMs) : null,
+        displayValue: fieldInpMs !== null ? formatMs(fieldInpMs) : ((_J = audits["total-blocking-time"]) == null ? void 0 : _J.displayValue) || formatMs(tbtMs),
+        rating: fieldInpMs !== null ? rateMetric(fieldInpMs, 200, 500) : rateMetric(tbtMs, 200, 600),
+        target: "≤ 200 ms"
+      },
+      cls: {
+        label: "CLS (Cumulative Layout Shift)",
+        value: typeof clsVal === "number" ? Number(clsVal.toFixed(3)) : null,
+        displayValue: ((_K = audits["cumulative-layout-shift"]) == null ? void 0 : _K.displayValue) || (typeof clsVal === "number" ? clsVal.toFixed(3) : "N/A"),
+        rating: rateMetric(clsVal, 0.1, 0.25),
+        target: "≤ 0.10"
+      },
+      fcp: {
+        label: "FCP (First Contentful Paint)",
+        value: typeof fcpMs === "number" ? Math.round(fcpMs) : null,
+        displayValue: ((_L = audits["first-contentful-paint"]) == null ? void 0 : _L.displayValue) || formatMs(fcpMs),
+        rating: rateMetric(fcpMs, 1800, 3e3),
+        target: "≤ 1.8 s"
+      },
+      ttfb: {
+        label: "TTFB (Server Response)",
+        value: typeof ttfbMs === "number" ? Math.round(ttfbMs) : null,
+        displayValue: ((_M = audits["server-response-time"]) == null ? void 0 : _M.displayValue) || formatMs(ttfbMs),
+        rating: rateMetric(ttfbMs, 800, 1800),
+        target: "≤ 800 ms"
+      },
+      si: {
+        label: "Speed Index",
+        value: typeof siMs === "number" ? Math.round(siMs) : null,
+        displayValue: ((_N = audits["speed-index"]) == null ? void 0 : _N.displayValue) || formatMs(siMs),
+        rating: rateMetric(siMs, 3400, 5800),
+        target: "≤ 3.4 s"
+      }
+    },
+    lcpElement,
+    totalBytes,
+    totalBytesLabel: formatBytes(totalBytes) || "N/A",
+    opportunities: opportunities.slice(0, 12),
+    seoFindings: seoFindings.slice(0, 10)
+  };
+  parsed.manualChecklist = buildManualPageSpeedChecklist(parsed);
+  return parsed;
+}
+async function runLivePageSpeedTest({
+  url,
+  shop,
+  strategy = "mobile",
+  apiKey = "",
+  fetchImpl = globalThis.fetch
+}) {
+  var _a2;
+  if (typeof fetchImpl !== "function") {
+    throw new Error("Fetch API is unavailable in this runtime.");
+  }
+  const normalizedUrl = normalizePageSpeedTargetUrl(shop, url);
+  const cleanStrategy = String(strategy || "mobile").toLowerCase() === "desktop" ? "desktop" : "mobile";
+  const params = new URLSearchParams();
+  params.set("url", normalizedUrl);
+  params.set("strategy", cleanStrategy);
+  params.append("category", "performance");
+  params.append("category", "seo");
+  params.append("category", "accessibility");
+  params.append("category", "best-practices");
+  const cleanKey = String(apiKey || "").trim();
+  if (cleanKey) {
+    params.set("key", cleanKey);
+  }
+  const endpoint = `${PAGESPEED_ENDPOINT}?${params.toString()}`;
+  const response = await fetchImpl(endpoint, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(45e3) : void 0
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const rawMsg = ((_a2 = payload == null ? void 0 : payload.error) == null ? void 0 : _a2.message) || `Google PageSpeed Insights returned HTTP ${response.status}.`;
+    if (response.status === 429) {
+      throw new Error(
+        "Google PageSpeed API public rate limit reached. Add a Google PageSpeed API key in SuperAdmin → AI & API Config (or .env GOOGLE_PAGESPEED_API_KEY) for dedicated quota."
+      );
+    }
+    throw new Error(rawMsg);
+  }
+  return parsePageSpeedApiResponse(payload, normalizedUrl, cleanStrategy);
+}
+const DEFAULT_CHAT_EXECUTOR_DEPS = {
+  getAppState,
+  updateAppState,
+  runFullScan,
+  applyIncrementalAuditPatch,
+  runAiAutoFixProducts,
+  saveProductSeoAndRescan,
+  rollbackProductRevision,
+  loadProductsPage,
+  loadImageOptimizerPage,
+  applyImageAltFixesAndRescan,
+  applyImageCompressionBatch,
+  regenerateSitemap,
+  updateAutopilotSettings,
+  aiRobotsImprovement,
+  generateAiRobotsSuggestion,
+  generateProductContentFix,
+  generateVisionImageAlt,
+  runLivePageSpeedTest,
+  getEffectivePageSpeedConfig,
+  checkCreditBalance,
+  deductCredits,
+  getOrCreateCreditAccount,
+  fetchProductById,
+  fetchProducts,
+  findLatestRevision: async (shop, productId = "") => {
+    try {
+      return await prisma.productRevision.findFirst({
+        where: {
+          shop: String(shop || ""),
+          ...productId ? { productId: String(productId) } : {}
+        },
+        orderBy: { createdAt: "desc" }
+      });
+    } catch {
+      return null;
+    }
+  }
+};
+function severityRank$1(severity) {
+  if (severity === "Critical") return 0;
+  if (severity === "Warning") return 1;
+  return 2;
+}
+function formatBytesShort(bytes = 0) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${Math.round(value)} B`;
+}
+function clipText(val, max = 90) {
+  const s = String(val || "").replace(/\s+/g, " ").trim();
+  if (!s) return "(empty)";
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+function extractScanScore(appState) {
+  var _a2, _b, _c;
+  const raw = ((_b = (_a2 = appState == null ? void 0 : appState.lastScan) == null ? void 0 : _a2.summary) == null ? void 0 : _b.score) ?? ((_c = appState == null ? void 0 : appState.lastScan) == null ? void 0 : _c.score);
+  return Number.isFinite(Number(raw)) ? Number(raw) : null;
+}
+function buildScoreReportMeta(beforeState, afterState) {
+  const beforeScore = extractScanScore(beforeState);
+  const afterScore = extractScanScore(afterState);
+  const scoreDelta = beforeScore != null && afterScore != null ? afterScore - beforeScore : null;
+  return { beforeScore, afterScore, scoreDelta };
+}
+function buildFieldDiffs(labelPrefix, beforeObj = {}, afterObj = {}) {
+  const fields = [
+    { key: "title", label: "Product Title" },
+    { key: "focusKeyword", label: "Focus Keyword" },
+    { key: "handle", label: "URL Handle" },
+    { key: "metaTitle", label: "Meta Title" },
+    { key: "metaDescription", label: "Meta Description" }
+  ];
+  const diffs = [];
+  for (const f of fields) {
+    const prev = String((beforeObj == null ? void 0 : beforeObj[f.key]) ?? "").trim();
+    const next = String((afterObj == null ? void 0 : afterObj[f.key]) ?? "").trim();
+    if (prev !== next && next) {
+      diffs.push({
+        label: labelPrefix ? `${labelPrefix} · ${f.label}` : f.label,
+        before: clipText(prev, 70),
+        after: clipText(next, 70)
+      });
+    }
+  }
+  return diffs;
+}
+function collectChatFixableProducts(issues = [], limit = 5, filterIds = []) {
+  const wanted = new Set((Array.isArray(filterIds) ? filterIds : []).map(String).filter(Boolean));
+  const sorted = [...Array.isArray(issues) ? issues : []].sort(
+    (a, b) => severityRank$1(a == null ? void 0 : a.severity) - severityRank$1(b == null ? void 0 : b.severity)
+  );
+  const selected = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const issue of sorted) {
+    const meta = issue == null ? void 0 : issue.meta;
+    const focusMatch = String((issue == null ? void 0 : issue.fixPath) || "").match(/[?&]focus=(\d+)/);
+    const productId = (meta == null ? void 0 : meta.productId) ? String(meta.productId) : (focusMatch == null ? void 0 : focusMatch[1]) || "";
+    if (!productId || seen.has(productId)) continue;
+    if (wanted.size > 0 && !wanted.has(productId)) continue;
+    seen.add(productId);
+    const handleMatch = String((issue == null ? void 0 : issue.targetUrl) || "").match(/\/products\/([^/?#]+)/);
+    selected.push({
+      id: productId,
+      title: String((meta == null ? void 0 : meta.productTitle) || ""),
+      handle: String((meta == null ? void 0 : meta.handle) || (handleMatch == null ? void 0 : handleMatch[1]) || ""),
+      focusKeyword: String((meta == null ? void 0 : meta.focusKeyword) || ""),
+      metaTitle: String((meta == null ? void 0 : meta.metaTitle) || ""),
+      metaDescription: String((meta == null ? void 0 : meta.metaDescription) || ""),
+      targetUrl: String((issue == null ? void 0 : issue.targetUrl) || ""),
+      fixPath: String((issue == null ? void 0 : issue.fixPath) || `/app/products?focus=${productId}`)
+    });
+    if (selected.length >= limit) break;
+  }
+  return selected;
+}
+function buildAiChatStoreContext({ shop, appState }) {
+  var _a2, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C;
+  const scan = (appState == null ? void 0 : appState.lastScan) || null;
+  const issues = Array.isArray(scan == null ? void 0 : scan.issues) ? scan.issues : [];
+  const missingAltCount = issues.filter(
+    (issue) => String((issue == null ? void 0 : issue.title) || "").toLowerCase().includes("alt")
+  ).length;
+  const metaIssueProducts = collectChatFixableProducts(issues, 12).length;
+  const robotsValidation = validateRobotsRules((appState == null ? void 0 : appState.robotsTxt) || "");
+  return {
+    shop: String(shop || ""),
+    hasScan: Boolean(scan),
+    scan: scan ? {
+      healthScore: ((_a2 = scan.summary) == null ? void 0 : _a2.score) ?? scan.score ?? null,
+      health: ((_b = scan.summary) == null ? void 0 : _b.health) || "",
+      pagesScanned: Number(scan.pagesScanned || 0),
+      criticalCount: Number(((_d = (_c = scan.summary) == null ? void 0 : _c.counts) == null ? void 0 : _d.critical) ?? 0),
+      warningCount: Number(((_f = (_e = scan.summary) == null ? void 0 : _e.counts) == null ? void 0 : _f.warning) ?? 0),
+      infoCount: Number(((_h = (_g = scan.summary) == null ? void 0 : _g.counts) == null ? void 0 : _h.info) ?? 0),
+      missingAltCount,
+      metaIssueProducts,
+      pillars: ((_i = scan.summary) == null ? void 0 : _i.pillars) || null,
+      topIssues: issues.slice(0, 8).map((issue) => {
+        var _a3, _b2;
+        return {
+          title: String((issue == null ? void 0 : issue.title) || ""),
+          severity: String((issue == null ? void 0 : issue.severity) || "Info"),
+          productId: ((_a3 = issue == null ? void 0 : issue.meta) == null ? void 0 : _a3.productId) ? String(issue.meta.productId) : null,
+          productTitle: ((_b2 = issue == null ? void 0 : issue.meta) == null ? void 0 : _b2.productTitle) ? String(issue.meta.productTitle) : null,
+          detail: String((issue == null ? void 0 : issue.detail) || "").slice(0, 140)
+        };
+      }),
+      topFixableProducts: collectChatFixableProducts(issues, 5).map((product) => ({
+        id: product.id,
+        title: product.title,
+        handle: product.handle
+      }))
+    } : null,
+    robots: {
+      configured: Boolean(String((appState == null ? void 0 : appState.robotsTxt) || "").trim()),
+      valid: Boolean(robotsValidation.valid),
+      message: robotsValidation.message || ""
+    },
+    sitemap: {
+      urlCount: Array.isArray(appState == null ? void 0 : appState.sitemapUrls) ? appState.sitemapUrls.length : 0,
+      lastGeneratedAt: (appState == null ? void 0 : appState.sitemapGeneratedAt) || null
+    },
+    pageSpeed: {
+      lastTestedUrl: ((_j = appState == null ? void 0 : appState.pageSpeed) == null ? void 0 : _j.lastTestedUrl) || "",
+      lastTestedAt: ((_k = appState == null ? void 0 : appState.pageSpeed) == null ? void 0 : _k.lastTestedAt) || null,
+      mobileScore: ((_n = (_m = (_l = appState == null ? void 0 : appState.pageSpeed) == null ? void 0 : _l.mobile) == null ? void 0 : _m.scores) == null ? void 0 : _n.performance) ?? null,
+      mobileLcp: ((_r = (_q = (_p = (_o = appState == null ? void 0 : appState.pageSpeed) == null ? void 0 : _o.mobile) == null ? void 0 : _p.metrics) == null ? void 0 : _q.lcp) == null ? void 0 : _r.displayValue) || null,
+      desktopScore: ((_u = (_t = (_s = appState == null ? void 0 : appState.pageSpeed) == null ? void 0 : _s.desktop) == null ? void 0 : _t.scores) == null ? void 0 : _u.performance) ?? null
+    },
+    imageCompression: {
+      totalImagesOptimized: Number(((_v = appState == null ? void 0 : appState.imageCompressionStats) == null ? void 0 : _v.totalImagesOptimized) || 0),
+      totalBytesSaved: Number(((_w = appState == null ? void 0 : appState.imageCompressionStats) == null ? void 0 : _w.totalBytesSaved) || 0)
+    },
+    autopilot: {
+      enabled: Boolean((_x = appState == null ? void 0 : appState.autopilot) == null ? void 0 : _x.enabled),
+      optimizeMeta: ((_y = appState == null ? void 0 : appState.autopilot) == null ? void 0 : _y.optimizeMeta) !== false,
+      optimizeAlt: ((_z = appState == null ? void 0 : appState.autopilot) == null ? void 0 : _z.optimizeAlt) !== false
+    },
+    gsc: {
+      connected: Boolean((_A = appState == null ? void 0 : appState.gsc) == null ? void 0 : _A.connected),
+      quickWinsCount: Number(((_C = (_B = appState == null ? void 0 : appState.gsc) == null ? void 0 : _B.summary) == null ? void 0 : _C.quickWinsCount) || 0)
+    }
+  };
+}
+async function loadAiChatCatalogSummary({
+  shop,
+  storeDomain,
+  token,
+  apiVersion,
+  query = "",
+  limit = 25,
+  deps = DEFAULT_CHAT_EXECUTOR_DEPS
+}) {
+  var _a2, _b, _c;
+  const appState = shop ? await deps.getAppState(shop) : null;
+  const savedSeoMap = (appState == null ? void 0 : appState.productSeo) || {};
+  const issueCounts = /* @__PURE__ */ new Map();
+  for (const issue of ((_a2 = appState == null ? void 0 : appState.lastScan) == null ? void 0 : _a2.issues) || []) {
+    const pid = ((_b = issue == null ? void 0 : issue.meta) == null ? void 0 : _b.productId) ? String(issue.meta.productId) : "";
+    if (!pid) continue;
+    issueCounts.set(pid, (issueCounts.get(pid) || 0) + 1);
+  }
+  if (token && (storeDomain || shop)) {
+    try {
+      const { products } = await deps.fetchProducts({
+        storeDomain: storeDomain || shop,
+        token,
+        apiVersion,
+        limit,
+        query: String(query || "").trim(),
+        includeDescription: false
+      });
+      if (Array.isArray(products)) {
+        return products.map((product) => {
+          const row = mapShopifyProductToSeoRow(product, savedSeoMap[String(product.id)] || {});
+          return {
+            id: String(row.id),
+            title: String(row.title || ""),
+            handle: String(row.handle || ""),
+            focusKeyword: String(row.focusKeyword || ""),
+            metaTitle: String(row.metaTitle || ""),
+            metaDescription: String(row.metaDescription || ""),
+            seoScore: typeof row.seoScore === "number" ? row.seoScore : null,
+            issueCount: issueCounts.get(String(row.id)) || 0
+          };
+        });
+      }
+    } catch {
+    }
+  }
+  const scanProducts = collectChatFixableProducts(((_c = appState == null ? void 0 : appState.lastScan) == null ? void 0 : _c.issues) || [], limit);
+  const q = String(query || "").trim().toLowerCase();
+  return scanProducts.filter((p) => !q || p.title.toLowerCase().includes(q) || p.handle.toLowerCase().includes(q)).map((p) => {
+    var _a3;
+    return {
+      id: p.id,
+      title: p.title,
+      handle: p.handle,
+      focusKeyword: ((_a3 = savedSeoMap[p.id]) == null ? void 0 : _a3.focusKeyword) || p.focusKeyword || "",
+      metaTitle: p.metaTitle || "",
+      metaDescription: p.metaDescription || "",
+      seoScore: null,
+      issueCount: issueCounts.get(p.id) || 1
+    };
+  });
+}
+function normalizeStoredChatMessage(raw = {}) {
+  const role = (raw == null ? void 0 : raw.role) === "user" ? "user" : "assistant";
+  const content2 = String((raw == null ? void 0 : raw.content) || "").trim().slice(0, 4e3);
+  if (!content2) return null;
+  return {
+    id: String((raw == null ? void 0 : raw.id) || `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`),
+    role,
+    content: content2,
+    createdAt: (raw == null ? void 0 : raw.createdAt) || (/* @__PURE__ */ new Date()).toISOString(),
+    suggestedActions: Array.isArray(raw == null ? void 0 : raw.suggestedActions) ? raw.suggestedActions.slice(0, 4) : [],
+    quickReplies: Array.isArray(raw == null ? void 0 : raw.quickReplies) ? raw.quickReplies.slice(0, 4) : [],
+    executedActions: (raw == null ? void 0 : raw.executedActions) && typeof raw.executedActions === "object" ? raw.executedActions : {},
+    actionResult: (raw == null ? void 0 : raw.actionResult) && typeof raw.actionResult === "object" ? raw.actionResult : null,
+    fallbackUsed: Boolean(raw == null ? void 0 : raw.fallbackUsed)
+  };
+}
+async function appendAiChatMessages(shop, messages = [], { markActionId = "", markMessageId = "", actionResult = null, deps = DEFAULT_CHAT_EXECUTOR_DEPS } = {}) {
+  const normalizedAdditions = (Array.isArray(messages) ? messages : []).map(normalizeStoredChatMessage).filter(Boolean);
+  const nextState = await deps.updateAppState(shop, (current) => {
+    let existing = Array.isArray(current.aiChatHistory) ? current.aiChatHistory.map(normalizeStoredChatMessage).filter(Boolean) : [];
+    if (markActionId) {
+      existing = existing.map((entry2) => {
+        if (markMessageId && entry2.id !== markMessageId) return entry2;
+        const hasAction = Array.isArray(entry2.suggestedActions) ? entry2.suggestedActions.some((act) => (act == null ? void 0 : act.id) === markActionId) : false;
+        if (!hasAction) return entry2;
+        return {
+          ...entry2,
+          executedActions: {
+            ...entry2.executedActions || {},
+            [markActionId]: {
+              ok: Boolean(actionResult == null ? void 0 : actionResult.ok),
+              summary: String((actionResult == null ? void 0 : actionResult.summary) || (actionResult == null ? void 0 : actionResult.error) || "Completed"),
+              executedAt: (/* @__PURE__ */ new Date()).toISOString()
+            }
+          }
+        };
+      });
+    }
+    return {
+      ...current,
+      aiChatHistory: [...existing, ...normalizedAdditions].slice(-30)
+    };
+  });
+  return nextState.aiChatHistory || [];
+}
+function toCompactPageSpeedEntry(report) {
+  var _a2, _b, _c, _d, _e, _f, _g, _h;
+  if (!report) return null;
+  return {
+    testedAt: report.fetchTime || (/* @__PURE__ */ new Date()).toISOString(),
+    url: report.testedUrl,
+    strategy: report.strategy,
+    performance: ((_a2 = report.scores) == null ? void 0 : _a2.performance) ?? null,
+    seo: ((_b = report.scores) == null ? void 0 : _b.seo) ?? null,
+    accessibility: ((_c = report.scores) == null ? void 0 : _c.accessibility) ?? null,
+    bestPractices: ((_d = report.scores) == null ? void 0 : _d.bestPractices) ?? null,
+    lcp: ((_f = (_e = report.metrics) == null ? void 0 : _e.lcp) == null ? void 0 : _f.displayValue) || "N/A",
+    cls: ((_h = (_g = report.metrics) == null ? void 0 : _g.cls) == null ? void 0 : _h.displayValue) || "N/A",
+    passwordProtected: Boolean(report.passwordProtected)
+  };
+}
+async function resolveTargetProductsForAutoFix({
+  shop,
+  storeDomain,
+  token,
+  apiVersion,
+  appState,
+  params,
+  deps,
+  includeDescription = false
+}) {
+  var _a2, _b, _c;
+  const maxProducts = Math.max(1, Math.min(5, Number((params == null ? void 0 : params.maxProducts) || 3)));
+  const requestedIds = Array.isArray(params == null ? void 0 : params.productIds) ? params.productIds.map(String).filter(Boolean) : [];
+  let candidates = includeDescription ? [] : collectChatFixableProducts(((_a2 = appState == null ? void 0 : appState.lastScan) == null ? void 0 : _a2.issues) || [], maxProducts, requestedIds);
+  if (candidates.length > 0 && requestedIds.length === 0) {
+    return candidates;
+  }
+  const idsToFetch = requestedIds.length > 0 ? requestedIds : collectChatFixableProducts(((_b = appState == null ? void 0 : appState.lastScan) == null ? void 0 : _b.issues) || [], maxProducts).map((item) => String(item.id));
+  if (idsToFetch.length > 0 && token && typeof deps.fetchProductById === "function") {
+    const foundIds = new Set(candidates.map((c) => String(c.id)));
+    for (const reqId of idsToFetch) {
+      if (foundIds.has(reqId)) continue;
+      try {
+        const prod = await deps.fetchProductById({
+          storeDomain: storeDomain || shop,
+          token,
+          apiVersion,
+          productId: reqId
+        });
+        if (prod) {
+          const row = mapShopifyProductToSeoRow(prod, ((_c = appState == null ? void 0 : appState.productSeo) == null ? void 0 : _c[String(prod.id)]) || {});
+          candidates.push({
+            id: String(row.id),
+            title: String(row.title || ""),
+            handle: String(row.handle || ""),
+            focusKeyword: String(row.focusKeyword || ""),
+            metaTitle: String(row.metaTitle || ""),
+            metaDescription: String(row.metaDescription || ""),
+            ...includeDescription ? {
+              descriptionHtml: String(row.descriptionHtml || prod.body_html || ""),
+              productType: String(prod.product_type || ""),
+              tags: String(prod.tags || "")
+            } : {}
+          });
+          foundIds.add(String(row.id));
+        }
+      } catch {
+      }
+    }
+    if (candidates.length > 0) return candidates.slice(0, maxProducts);
+  }
+  const page = await deps.loadProductsPage({
+    shop,
+    storeDomain,
+    token,
+    apiVersion,
+    limit: 15,
+    includeDescription
+  });
+  const rows = Array.isArray(page == null ? void 0 : page.rows) ? page.rows : [];
+  const wantedSet = new Set(requestedIds);
+  const filtered = wantedSet.size ? rows.filter((row) => wantedSet.has(String(row.id))) : rows.filter((row) => Number(row.seoScore ?? 0) < 90);
+  candidates = (filtered.length ? filtered : rows).slice(0, maxProducts).map((row) => ({
+    id: String(row.id),
+    title: String(row.title || ""),
+    handle: String(row.handle || ""),
+    focusKeyword: String(row.focusKeyword || ""),
+    metaTitle: String(row.metaTitle || ""),
+    metaDescription: String(row.metaDescription || ""),
+    ...includeDescription ? {
+      descriptionHtml: String(row.descriptionHtml || ""),
+      productType: String(row.productType || ""),
+      tags: String(row.tags || "")
+    } : {}
+  }));
+  return candidates;
+}
+async function executeAiChatFixAction({
+  shop,
+  storeDomain,
+  token,
+  apiVersion,
+  action: action2 = {},
+  aiSettings = null,
+  aiAllowed = true,
+  hasSuperAccess = false,
+  deps: partialDeps = {}
+}) {
+  var _a2, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C, _D, _E, _F, _G, _H, _I, _J, _K, _L, _M, _N, _O, _P, _Q, _R, _S, _T;
+  const deps = { ...DEFAULT_CHAT_EXECUTOR_DEPS, ...partialDeps };
+  const type = String((action2 == null ? void 0 : action2.type) || "").trim().toUpperCase();
+  const params = (action2 == null ? void 0 : action2.params) && typeof action2.params === "object" ? action2.params : {};
+  if (!AI_CHAT_ACTION_TYPES.includes(type)) {
+    return {
+      ok: false,
+      actionType: type || "UNKNOWN",
+      error: `Unsupported AI Mode action type: ${type || "empty"}.`
+    };
+  }
+  if (type === "OPEN_ROUTE") {
+    const route32 = String(params.route || "/app/seo-audit");
+    return {
+      ok: true,
+      actionType: type,
+      title: "Opening Workspace",
+      summary: `Navigate to ${route32}`,
+      navigateTo: route32
+    };
+  }
+  if (!shop || !token) {
+    if (type !== "TOGGLE_AUTOPILOT" && type !== "RUN_PAGESPEED_TEST") {
+      return {
+        ok: false,
+        actionType: type,
+        error: "Active Shopify session token is required to apply this store fix."
+      };
+    }
+  }
+  const beforeState = shop ? await deps.getAppState(shop) : null;
+  const checkedAt = (/* @__PURE__ */ new Date()).toISOString();
+  if (type === "RUN_FULL_SCAN") {
+    const scan = await deps.runFullScan({ storeDomain: storeDomain || shop, token, apiVersion, shop });
+    const score = ((_a2 = scan == null ? void 0 : scan.summary) == null ? void 0 : _a2.score) ?? (scan == null ? void 0 : scan.score) ?? 0;
+    const criticalCount = ((_c = (_b = scan == null ? void 0 : scan.summary) == null ? void 0 : _b.counts) == null ? void 0 : _c.critical) ?? 0;
+    const warningCount = ((_e = (_d = scan == null ? void 0 : scan.summary) == null ? void 0 : _d.counts) == null ? void 0 : _e.warning) ?? 0;
+    const afterState = shop ? await deps.getAppState(shop) : { lastScan: scan };
+    const beforeScore = extractScanScore(beforeState);
+    return {
+      ok: true,
+      actionType: type,
+      title: "Full Store SEO Scan Complete",
+      summary: `SEO Score: ${score}/100 across ${(scan == null ? void 0 : scan.pagesScanned) || 0} pages (${criticalCount} critical, ${warningCount} warnings).`,
+      details: Array.isArray(scan == null ? void 0 : scan.issues) ? scan.issues.slice(0, 4).map((issue) => `${issue.severity}: ${issue.title}`) : [],
+      metrics: {
+        score,
+        pagesScanned: (scan == null ? void 0 : scan.pagesScanned) || 0,
+        criticalCount,
+        warningCount
+      },
+      liveReport: {
+        beforeScore,
+        afterScore: Number.isFinite(Number(score)) ? Number(score) : null,
+        scoreDelta: beforeScore != null ? Number(score) - beforeScore : null,
+        checkedAt,
+        diffs: [
+          ...beforeScore != null ? [{ label: "Store SEO Score", before: `${beforeScore}/100`, after: `${score}/100` }] : [{ label: "Store SEO Score", before: "Unscanned", after: `${score}/100` }],
+          {
+            label: "Catalog Coverage",
+            before: `${((_f = beforeState == null ? void 0 : beforeState.lastScan) == null ? void 0 : _f.pagesScanned) ?? 0} pages`,
+            after: `${(scan == null ? void 0 : scan.pagesScanned) ?? ((_g = afterState == null ? void 0 : afterState.lastScan) == null ? void 0 : _g.pagesScanned) ?? 0} pages`
+          },
+          {
+            label: "Critical / Warning Issues",
+            before: `${((_j = (_i = (_h = beforeState == null ? void 0 : beforeState.lastScan) == null ? void 0 : _h.summary) == null ? void 0 : _i.counts) == null ? void 0 : _j.critical) ?? "-"} / ${((_m = (_l = (_k = beforeState == null ? void 0 : beforeState.lastScan) == null ? void 0 : _k.summary) == null ? void 0 : _l.counts) == null ? void 0 : _m.warning) ?? "-"}`,
+            after: `${criticalCount} / ${warningCount}`
+          }
+        ]
+      }
+    };
+  }
+  if (type === "UPDATE_SPECIFIC_PRODUCT") {
+    const productId = String(params.productId || params.id || "").trim();
+    if (!productId) {
+      return {
+        ok: false,
+        actionType: type,
+        error: "Select a product or specify a product ID to update."
+      };
+    }
+    const liveProduct = await deps.fetchProductById({
+      storeDomain: storeDomain || shop,
+      token,
+      apiVersion,
+      productId
+    });
+    if (!liveProduct) {
+      return {
+        ok: false,
+        actionType: type,
+        error: `Shopify product ${productId} could not be found.`
+      };
+    }
+    const currentRow = mapShopifyProductToSeoRow(
+      liveProduct,
+      ((_n = beforeState == null ? void 0 : beforeState.productSeo) == null ? void 0 : _n[productId]) || {}
+    );
+    const nextPayload = {
+      title: String(params.title || currentRow.title || "").trim(),
+      handle: String(params.handle || currentRow.handle || "").trim(),
+      focusKeyword: String(params.focusKeyword ?? currentRow.focusKeyword ?? "").trim(),
+      metaTitle: String(params.metaTitle ?? currentRow.metaTitle ?? "").trim(),
+      metaDescription: String(params.metaDescription ?? currentRow.metaDescription ?? "").trim(),
+      descriptionHtml: currentRow.descriptionHtml || "",
+      originalHandle: currentRow.handle || "",
+      previousValues: {
+        title: currentRow.title,
+        handle: currentRow.handle,
+        focusKeyword: currentRow.focusKeyword,
+        metaTitle: currentRow.metaTitle,
+        metaDescription: currentRow.metaDescription
+      }
+    };
+    const result = await deps.saveProductSeoAndRescan({
+      shop,
+      storeDomain: storeDomain || shop,
+      token,
+      apiVersion,
+      productId,
+      payload: nextPayload
+    });
+    if (!(result == null ? void 0 : result.ok)) {
+      const firstErr = (result == null ? void 0 : result.errors) ? Object.values(result.errors).find(Boolean) : "";
+      return {
+        ok: false,
+        actionType: type,
+        title: "Product SEO Validation Error",
+        error: (result == null ? void 0 : result.error) || firstErr || "Could not save product SEO updates."
+      };
+    }
+    const afterState = shop ? await deps.getAppState(shop) : beforeState;
+    const scoreMeta = buildScoreReportMeta(beforeState, afterState);
+    const saved = result.normalized || nextPayload;
+    const diffs = buildFieldDiffs(saved.title || currentRow.title, currentRow, saved);
+    if (result.redirectCreated) {
+      diffs.push({
+        label: "Shopify 301 Redirect",
+        before: `/products/${currentRow.handle}`,
+        after: `/products/${saved.handle}`
+      });
+    }
+    if (scoreMeta.afterScore != null) {
+      diffs.push({
+        label: "Store SEO Score",
+        before: scoreMeta.beforeScore != null ? `${scoreMeta.beforeScore}/100` : "-",
+        after: `${scoreMeta.afterScore}/100`
+      });
+    }
+    const latestRev = await deps.findLatestRevision(shop, productId);
+    return {
+      ok: true,
+      actionType: type,
+      title: `Updated "${saved.title || currentRow.title}"`,
+      summary: `Saved live Shopify SEO fields for "${saved.title || currentRow.title}"${result.redirectCreated ? " and created a 301 redirect" : ""}.`,
+      details: diffs.map((d) => `${d.label}: ${d.before} -> ${d.after}`),
+      liveReport: {
+        ...scoreMeta,
+        checkedAt,
+        diffs,
+        rollbackRevisionId: (latestRev == null ? void 0 : latestRev.id) || ""
+      }
+    };
+  }
+  if (type === "AUTO_FIX_PRODUCTS") {
+    if (!aiAllowed) {
+      return {
+        ok: false,
+        actionType: type,
+        error: "AI Auto-Fix is currently disabled for this store."
+      };
+    }
+    const products = await resolveTargetProductsForAutoFix({
+      shop,
+      storeDomain: storeDomain || shop,
+      token,
+      apiVersion,
+      appState: beforeState,
+      params,
+      deps
+    });
+    if (!products.length) {
+      return {
+        ok: true,
+        actionType: type,
+        title: "Catalog Looks Healthy",
+        summary: "No Shopify products requiring meta or SEO fixes were found in the current scan.",
+        details: []
+      };
+    }
+    const beforeMap = new Map(products.map((p) => [String(p.id), p]));
+    const result = await deps.runAiAutoFixProducts({
+      shop,
+      storeDomain: storeDomain || shop,
+      token,
+      apiVersion,
+      products
+    });
+    const afterState = shop ? await deps.getAppState(shop) : beforeState;
+    const scoreMeta = buildScoreReportMeta(beforeState, afterState);
+    const diffs = [];
+    let rollbackRevisionId = "";
+    for (const fixed of Array.isArray(result == null ? void 0 : result.fixedProducts) ? result.fixedProducts : []) {
+      const beforeItem = beforeMap.get(String(fixed.id)) || {};
+      const itemDiffs = buildFieldDiffs(fixed.title || beforeItem.title || fixed.id, beforeItem, fixed);
+      diffs.push(...itemDiffs);
+      if (fixed.redirectCreated) {
+        diffs.push({
+          label: `${fixed.title || fixed.id} · 301 Redirect`,
+          before: beforeItem.handle ? `/products/${beforeItem.handle}` : "Old URL",
+          after: fixed.handle ? `/products/${fixed.handle}` : "Redirect Active"
+        });
+      }
+      if (!rollbackRevisionId) {
+        const rev = await deps.findLatestRevision(shop, String(fixed.id));
+        if (rev == null ? void 0 : rev.id) rollbackRevisionId = rev.id;
+      }
+    }
+    if (scoreMeta.afterScore != null) {
+      diffs.push({
+        label: "Store SEO Score",
+        before: scoreMeta.beforeScore != null ? `${scoreMeta.beforeScore}/100` : "-",
+        after: `${scoreMeta.afterScore}/100`
+      });
+    }
+    return {
+      ok: Boolean(result == null ? void 0 : result.ok),
+      actionType: type,
+      title: (result == null ? void 0 : result.ok) ? `AI Fixed ${result.fixedCount || 0} Product(s)` : "AI Product Auto-Fix",
+      summary: (result == null ? void 0 : result.ok) ? `Updated ${result.fixedCount || 0} product(s) in Shopify and refreshed your SEO score.${result.stoppedReason ? ` ${result.stoppedReason}` : ""}` : (result == null ? void 0 : result.error) || "Could not complete product auto-fix.",
+      details: Array.isArray(result == null ? void 0 : result.fixedProducts) ? result.fixedProducts.map(
+        (item) => `${item.title || item.id}${item.redirectCreated ? " (301 redirect created)" : ""}`
+      ) : [],
+      error: (result == null ? void 0 : result.error) || "",
+      outOfCredits: Boolean(result == null ? void 0 : result.outOfCredits),
+      creditInfo: {
+        creditsDeducted: Number((result == null ? void 0 : result.creditsDeducted) || 0),
+        creditsRemaining: typeof (result == null ? void 0 : result.creditsRemaining) === "number" ? result.creditsRemaining : void 0,
+        superAccess: Boolean((result == null ? void 0 : result.superAccess) || hasSuperAccess)
+      },
+      liveReport: (result == null ? void 0 : result.ok) ? {
+        ...scoreMeta,
+        checkedAt,
+        diffs: diffs.slice(0, 12),
+        rollbackRevisionId
+      } : null
+    };
+  }
+  if (type === "FIX_PRODUCT_DESCRIPTION") {
+    if (!aiAllowed) {
+      return {
+        ok: false,
+        actionType: type,
+        error: "AI product description updates are currently disabled for this store."
+      };
+    }
+    const products = await resolveTargetProductsForAutoFix({
+      shop,
+      storeDomain: storeDomain || shop,
+      token,
+      apiVersion,
+      appState: beforeState,
+      params,
+      deps,
+      includeDescription: true
+    });
+    if (!products.length) {
+      return {
+        ok: true,
+        actionType: type,
+        title: "Product Descriptions Checked",
+        summary: "No matching products were found to rewrite descriptions.",
+        details: []
+      };
+    }
+    const initialBalance = await deps.checkCreditBalance(shop, "product_content_fix");
+    if (!hasSuperAccess && !initialBalance.allowed) {
+      return {
+        ok: false,
+        actionType: type,
+        outOfCredits: true,
+        error: `Insufficient AI tokens (${initialBalance.availableCredits} left, requires ${initialBalance.cost} tokens per product description fix).`
+      };
+    }
+    const goal = ["polish", "structure", "expand"].includes(String(params.goal || "")) ? String(params.goal) : "expand";
+    const updated = [];
+    const diffs = [];
+    let creditsDeducted = 0;
+    let creditsRemaining;
+    let outOfCredits = false;
+    let stoppedReason = "";
+    let rollbackRevisionId = "";
+    let lastError = "";
+    for (let i = 0; i < products.length; i += 1) {
+      const item = products[i];
+      if (i > 0 && !hasSuperAccess) {
+        const nextBalance = await deps.checkCreditBalance(shop, "product_content_fix");
+        if (!nextBalance.allowed) {
+          outOfCredits = true;
+          stoppedReason = `Stopped after ${updated.length} product(s): insufficient AI tokens remaining (${nextBalance.availableCredits} left, needs ${nextBalance.cost}).`;
+          break;
+        }
+      }
+      try {
+        const beforeWords = validateProductDescription(
+          item.descriptionHtml || "",
+          item.focusKeyword || ""
+        ).wordCount;
+        const aiRes = await deps.generateProductContentFix({
+          settings: aiSettings,
+          title: item.title,
+          focusKeyword: item.focusKeyword || item.title,
+          descriptionHtml: item.descriptionHtml || "",
+          productType: item.productType || "",
+          tags: item.tags || "",
+          goal
+        });
+        const nextHtml = String((aiRes == null ? void 0 : aiRes.descriptionHtml) || "").trim();
+        if (!nextHtml) {
+          lastError = `AI returned an empty description for "${item.title || item.id}".`;
+          continue;
+        }
+        const saveRes = await deps.saveProductSeoAndRescan({
+          shop,
+          storeDomain: storeDomain || shop,
+          token,
+          apiVersion,
+          productId: item.id,
+          payload: {
+            title: item.title,
+            handle: item.handle,
+            focusKeyword: item.focusKeyword,
+            metaTitle: item.metaTitle,
+            metaDescription: item.metaDescription,
+            descriptionHtml: nextHtml,
+            originalHandle: item.handle,
+            previousValues: {
+              title: item.title,
+              handle: item.handle,
+              focusKeyword: item.focusKeyword,
+              metaTitle: item.metaTitle,
+              metaDescription: item.metaDescription
+            }
+          }
+        });
+        if (!(saveRes == null ? void 0 : saveRes.ok)) {
+          lastError = (saveRes == null ? void 0 : saveRes.error) || `Failed to save description for "${item.title || item.id}".`;
+          continue;
+        }
+        const afterWords = Number(aiRes == null ? void 0 : aiRes.wordCount) || validateProductDescription(nextHtml, item.focusKeyword || "").wordCount;
+        updated.push({
+          id: item.id,
+          title: item.title || item.id,
+          beforeWords,
+          afterWords
+        });
+        diffs.push({
+          label: `${item.title || item.id} · Description`,
+          before: `${beforeWords} words`,
+          after: `${afterWords} words (${goal})`
+        });
+        if (!rollbackRevisionId) {
+          const rev = await deps.findLatestRevision(shop, String(item.id));
+          if (rev == null ? void 0 : rev.id) rollbackRevisionId = rev.id;
+        }
+        if (!(aiRes == null ? void 0 : aiRes.fallbackUsed)) {
+          const debit = await deps.deductCredits({
+            shop,
+            actionType: "product_content_fix",
+            customCost: CREDIT_COSTS.product_content_fix,
+            productId: item.id,
+            productTitle: item.title,
+            ...(aiSettings == null ? void 0 : aiSettings.model) ? { modelUsed: aiSettings.model } : {},
+            bypassLimit: hasSuperAccess
+          });
+          creditsDeducted += Number((debit == null ? void 0 : debit.deducted) || 0);
+          if (typeof (debit == null ? void 0 : debit.remainingCredits) === "number") {
+            creditsRemaining = debit.remainingCredits;
+          }
+        }
+      } catch (err) {
+        lastError = (err == null ? void 0 : err.message) || `AI description update failed for "${item.title || item.id}".`;
+      }
+    }
+    const afterState = shop ? await deps.getAppState(shop) : beforeState;
+    const scoreMeta = buildScoreReportMeta(beforeState, afterState);
+    if (scoreMeta.afterScore != null) {
+      diffs.push({
+        label: "Store SEO Score",
+        before: scoreMeta.beforeScore != null ? `${scoreMeta.beforeScore}/100` : "-",
+        after: `${scoreMeta.afterScore}/100`
+      });
+    }
+    return {
+      ok: updated.length > 0,
+      actionType: type,
+      title: updated.length ? `AI Updated ${updated.length} Product Description(s)` : "AI Product Description Fix",
+      summary: updated.length ? `Rewrote and saved descriptions for ${updated.length} product(s) in Shopify (${creditsDeducted} token${creditsDeducted === 1 ? "" : "s"} used).${stoppedReason ? ` ${stoppedReason}` : ""}` : stoppedReason || lastError || "Could not update product descriptions.",
+      details: updated.map((entry2) => `${entry2.title}: ${entry2.beforeWords}w -> ${entry2.afterWords}w`),
+      error: updated.length ? "" : stoppedReason || lastError || "Could not update product descriptions.",
+      outOfCredits,
+      creditInfo: {
+        creditsDeducted,
+        creditsRemaining,
+        superAccess: hasSuperAccess
+      },
+      liveReport: updated.length ? {
+        ...scoreMeta,
+        checkedAt,
+        diffs: diffs.slice(0, 12),
+        rollbackRevisionId
+      } : null
+    };
+  }
+  if (type === "FIX_IMAGE_ALT") {
+    const maxImages = Math.max(1, Math.min(20, Number(params.maxImages || 10)));
+    const useAi = Boolean(params.useAi);
+    const wantedIds = new Set((Array.isArray(params.productIds) ? params.productIds : []).map(String).filter(Boolean));
+    const imagePage = await deps.loadImageOptimizerPage({
+      shop,
+      storeDomain: storeDomain || shop,
+      token,
+      apiVersion,
+      limit: 25,
+      tab: "alt",
+      statusFilter: "needs-fix"
+    });
+    let candidates = Array.isArray(imagePage == null ? void 0 : imagePage.rows) ? imagePage.rows : [];
+    if (wantedIds.size > 0) {
+      const matched = candidates.filter((row) => wantedIds.has(String(row.productId)));
+      if (matched.length > 0) candidates = matched;
+    }
+    const picked = candidates.slice(0, maxImages);
+    if (!picked.length) {
+      return {
+        ok: true,
+        actionType: type,
+        title: "Image ALT Audit Clean",
+        summary: "All checked product images already have descriptive ALT text.",
+        details: []
+      };
+    }
+    let creditsDeducted = 0;
+    let creditsRemaining;
+    let outOfCredits = false;
+    let stoppedReason = "";
+    const aiRowsById = /* @__PURE__ */ new Map();
+    if (useAi) {
+      if (!aiAllowed) {
+        return {
+          ok: false,
+          actionType: type,
+          error: "AI Vision ALT generation is currently disabled for this store."
+        };
+      }
+      const initialBalance = await deps.checkCreditBalance(shop, "vision_alt");
+      if (!hasSuperAccess && !initialBalance.allowed) {
+        return {
+          ok: false,
+          actionType: type,
+          outOfCredits: true,
+          error: `Insufficient AI tokens (${initialBalance.availableCredits} left, requires ${initialBalance.cost} tokens per AI Vision ALT image).`
+        };
+      }
+      for (let i = 0; i < picked.length; i += 1) {
+        const row = picked[i];
+        if (i > 0 && !hasSuperAccess) {
+          const nextBalance = await deps.checkCreditBalance(shop, "vision_alt");
+          if (!nextBalance.allowed) {
+            outOfCredits = true;
+            stoppedReason = `Stopped after ${aiRowsById.size} image(s): insufficient AI tokens remaining.`;
+            break;
+          }
+        }
+        try {
+          const aiAlt = await deps.generateVisionImageAlt({
+            settings: aiSettings,
+            imageUrl: row.imageUrl,
+            productTitle: row.productTitle || "Product"
+          });
+          if (aiAlt == null ? void 0 : aiAlt.altText) {
+            aiRowsById.set(String(row.id), aiAlt);
+          }
+        } catch {
+        }
+      }
+    }
+    const targetPicked = useAi && aiRowsById.size > 0 ? picked.filter((row) => aiRowsById.has(String(row.id))) : picked;
+    const rowsToFix = targetPicked.map((row) => {
+      const aiAlt = aiRowsById.get(String(row.id));
+      const altText = (aiAlt == null ? void 0 : aiAlt.altText) || row.suggestedAlt || `${row.productTitle || "Product"} photo`;
+      return {
+        id: String(row.id),
+        productId: String(row.productId),
+        altText: String(altText).slice(0, 125)
+      };
+    });
+    const result = await deps.applyImageAltFixesAndRescan({
+      shop,
+      storeDomain: storeDomain || shop,
+      token,
+      apiVersion,
+      rows: rowsToFix
+    });
+    if ((result == null ? void 0 : result.ok) && useAi) {
+      for (const row of targetPicked) {
+        const aiAlt = aiRowsById.get(String(row.id));
+        if (!aiAlt || aiAlt.fallbackUsed) continue;
+        const debit = await deps.deductCredits({
+          shop,
+          actionType: "vision_alt",
+          customCost: CREDIT_COSTS.vision_alt,
+          productId: row.productId,
+          productTitle: row.productTitle,
+          ...(aiSettings == null ? void 0 : aiSettings.model) ? { modelUsed: aiSettings.model } : {},
+          bypassLimit: hasSuperAccess
+        });
+        creditsDeducted += Number((debit == null ? void 0 : debit.deducted) || 0);
+        if (typeof (debit == null ? void 0 : debit.remainingCredits) === "number") {
+          creditsRemaining = debit.remainingCredits;
+        }
+      }
+    }
+    const afterState = shop ? await deps.getAppState(shop) : beforeState;
+    const scoreMeta = buildScoreReportMeta(beforeState, afterState);
+    const fixedAltMap = new Map(rowsToFix.map((r) => [r.id, r.altText]));
+    const diffs = targetPicked.slice(0, 6).map((row) => ({
+      label: row.productTitle || `Image ${row.id}`,
+      before: clipText(row.altText || "(missing ALT)", 55),
+      after: clipText(fixedAltMap.get(String(row.id)) || row.suggestedAlt || "", 55)
+    }));
+    return {
+      ok: Boolean(result == null ? void 0 : result.ok),
+      actionType: type,
+      title: (result == null ? void 0 : result.ok) ? "Product Image ALT Updated" : "Image ALT Update Issue",
+      summary: (result == null ? void 0 : result.ok) ? `Updated ALT text on ${result.updated ?? rowsToFix.length} product image(s) in Shopify and refreshed audit score.${stoppedReason ? ` ${stoppedReason}` : ""}` : (result == null ? void 0 : result.error) || "Failed to update image ALT tags.",
+      details: targetPicked.slice(0, 4).map(
+        (row) => `${row.productTitle || row.productId}: "${String(fixedAltMap.get(String(row.id)) || "").slice(0, 65)}"`
+      ),
+      error: (result == null ? void 0 : result.error) || "",
+      outOfCredits,
+      ...useAi ? {
+        creditInfo: {
+          creditsDeducted,
+          creditsRemaining,
+          superAccess: hasSuperAccess
+        }
+      } : {},
+      liveReport: (result == null ? void 0 : result.ok) ? {
+        ...scoreMeta,
+        checkedAt,
+        diffs
+      } : null
+    };
+  }
+  if (type === "COMPRESS_HEAVY_IMAGES") {
+    const preset = ["balanced", "lossless", "high"].includes(String(params.preset || "")) ? String(params.preset) : "balanced";
+    const maxImages = Math.max(1, Math.min(15, Number(params.maxImages || 8)));
+    const wantedIds = new Set((Array.isArray(params.productIds) ? params.productIds : []).map(String).filter(Boolean));
+    let imagePage = await deps.loadImageOptimizerPage({
+      shop,
+      storeDomain: storeDomain || shop,
+      token,
+      apiVersion,
+      limit: 25,
+      tab: "compression",
+      compressionFilter: wantedIds.size > 0 ? "all" : "needs-optimization"
+    });
+    let rows = Array.isArray(imagePage == null ? void 0 : imagePage.rows) ? imagePage.rows : [];
+    if (wantedIds.size > 0) {
+      const matched = rows.filter((row) => wantedIds.has(String(row.productId)));
+      if (matched.length > 0) rows = matched;
+    }
+    if (!rows.length) {
+      imagePage = await deps.loadImageOptimizerPage({
+        shop,
+        storeDomain: storeDomain || shop,
+        token,
+        apiVersion,
+        limit: 20,
+        tab: "compression",
+        compressionFilter: "all"
+      });
+      rows = (Array.isArray(imagePage == null ? void 0 : imagePage.rows) ? imagePage.rows : []).filter(
+        (row) => Number(row.sizeBytes || 0) > 100 * 1024
+      );
+    }
+    const targetRows = rows.slice(0, maxImages);
+    if (!targetRows.length) {
+      return {
+        ok: true,
+        actionType: type,
+        title: "Images Already Optimized",
+        summary: "No heavy product images needing compression were found on the current page.",
+        details: []
+      };
+    }
+    const creditCheck = await deps.checkCreditBalance(shop, "image_compression");
+    if (!hasSuperAccess && !creditCheck.allowed) {
+      return {
+        ok: false,
+        actionType: type,
+        outOfCredits: true,
+        error: `Insufficient AI tokens (${creditCheck.availableCredits} left, requires ${creditCheck.cost} token per compressed image).`
+      };
+    }
+    const result = await deps.applyImageCompressionBatch({
+      shop,
+      storeDomain: storeDomain || shop,
+      token,
+      apiVersion,
+      rows: targetRows,
+      compressionOptions: { preset },
+      hasSuperAccess
+    });
+    const diffs = Array.isArray(result == null ? void 0 : result.results) ? result.results.filter((item) => !item.skipped && item.ok).slice(0, 6).map((item) => ({
+      label: item.productTitle || `Image ${item.id}`,
+      before: formatBytesShort(item.originalBytes || 0),
+      after: `${formatBytesShort(item.compressedBytes || 0)} (-${item.savedPercent || 0}%)`
+    })) : [];
+    const creditsDeducted = Number((result == null ? void 0 : result.creditsDeducted) || 0);
+    const creditsRemaining = typeof (result == null ? void 0 : result.creditsRemaining) === "number" ? result.creditsRemaining : void 0;
+    const superAccessFlag = Boolean((result == null ? void 0 : result.superAccess) || hasSuperAccess);
+    return {
+      ok: Boolean(result == null ? void 0 : result.ok),
+      actionType: type,
+      title: (result == null ? void 0 : result.ok) ? "Catalog Images Compressed" : "Image Compression Issue",
+      summary: (result == null ? void 0 : result.ok) ? `Compressed ${result.compressedCount || 0} image(s) (saved ${formatBytesShort(result.totalBytesSaved || 0)} / -${result.totalSavedPercent || 0}%), skipped ${result.skippedCount || 0}.${(result == null ? void 0 : result.stoppedReason) ? ` ${result.stoppedReason}` : ""}` : (result == null ? void 0 : result.error) || "Image compression batch failed.",
+      details: diffs.map((d) => `${d.label}: ${d.before} -> ${d.after}`),
+      error: (result == null ? void 0 : result.error) || "",
+      outOfCredits: Boolean(result == null ? void 0 : result.outOfCredits),
+      creditInfo: {
+        creditsDeducted,
+        creditsRemaining,
+        superAccess: superAccessFlag
+      },
+      liveReport: (result == null ? void 0 : result.ok) ? {
+        beforeScore: extractScanScore(beforeState),
+        afterScore: extractScanScore(beforeState),
+        scoreDelta: null,
+        checkedAt,
+        diffs: [
+          {
+            label: "Preset Used",
+            before: "Original Storefront Asset(s)",
+            after: `${preset.toUpperCase()} (${result.compressedCount || 0} updated · ${superAccessFlag ? "Super Access" : `${creditsDeducted} tok`})`
+          },
+          ...diffs
+        ]
+      } : null
+    };
+  }
+  if (type === "FIX_ROBOTS_TXT") {
+    const currentRules = (beforeState == null ? void 0 : beforeState.robotsTxt) || "";
+    let nextRobots = "";
+    let rationale = "";
+    let creditsDeducted = 0;
+    let creditsRemaining;
+    if (typeof params.customRules === "string" && params.customRules.trim()) {
+      nextRobots = params.customRules.trim();
+      rationale = "Applied your custom robots.txt rules.";
+    } else if (params.useAi && aiAllowed) {
+      const creditCheck = await deps.checkCreditBalance(shop, "robots_txt_improvement");
+      if (!hasSuperAccess && !creditCheck.allowed) {
+        return {
+          ok: false,
+          actionType: type,
+          outOfCredits: true,
+          error: `Insufficient AI tokens (${creditCheck.availableCredits} left, requires ${creditCheck.cost}).`
+        };
+      }
+      const aiRes = await deps.generateAiRobotsSuggestion({
+        settings: aiSettings,
+        currentRules,
+        storeDomain: storeDomain || shop
+      });
+      nextRobots = String((aiRes == null ? void 0 : aiRes.robotsTxt) || "").trim();
+      rationale = String((aiRes == null ? void 0 : aiRes.rationale) || "");
+      if (nextRobots && !(aiRes == null ? void 0 : aiRes.fallbackUsed)) {
+        const debit = await deps.deductCredits({
+          shop,
+          actionType: "robots_txt_improvement",
+          customCost: creditCheck.cost,
+          productTitle: "Robots.txt Rules (AI)",
+          ...(aiSettings == null ? void 0 : aiSettings.model) ? { modelUsed: aiSettings.model } : {},
+          bypassLimit: hasSuperAccess
+        });
+        creditsDeducted = Number((debit == null ? void 0 : debit.deducted) || 0);
+        creditsRemaining = debit == null ? void 0 : debit.remainingCredits;
+      }
+    }
+    if (!nextRobots) {
+      const heuristic = deps.aiRobotsImprovement({ currentRules });
+      nextRobots = heuristic.robotsTxt;
+      rationale = heuristic.rationale;
+    }
+    await deps.updateAppState(shop, (current) => ({
+      ...current,
+      robotsTxt: nextRobots
+    }));
+    if (token) {
+      await deps.applyIncrementalAuditPatch({
+        shop,
+        storeDomain: storeDomain || shop,
+        token,
+        apiVersion,
+        updatedProducts: []
+      });
+    }
+    const afterState = shop ? await deps.getAppState(shop) : beforeState;
+    const scoreMeta = buildScoreReportMeta(beforeState, afterState);
+    const validation = validateRobotsRules(nextRobots);
+    return {
+      ok: true,
+      actionType: type,
+      title: "Robots.txt Directives Updated",
+      summary: `${rationale || "Applied crawl best-practice rules."} Validation: ${validation.valid ? "Valid" : validation.message}. Export to templates/robots.txt.liquid in Robots.txt if your theme customizes robots.`,
+      details: nextRobots.split("\n").slice(0, 6),
+      creditInfo: creditsDeducted ? { creditsDeducted, creditsRemaining, superAccess: hasSuperAccess } : void 0,
+      liveReport: {
+        ...scoreMeta,
+        checkedAt,
+        diffs: [
+          {
+            label: "Robots Directives",
+            before: `${currentRules ? currentRules.split("\n").filter(Boolean).length : 0} line(s)`,
+            after: `${nextRobots.split("\n").filter(Boolean).length} line(s) (${validation.valid ? "Valid" : "Needs Check"})`
+          }
+        ]
+      }
+    };
+  }
+  if (type === "REGENERATE_SITEMAP") {
+    const beforeCount = Array.isArray(beforeState == null ? void 0 : beforeState.sitemapUrls) ? beforeState.sitemapUrls.length : 0;
+    const result = await deps.regenerateSitemap({
+      shop,
+      storeDomain: storeDomain || shop,
+      token,
+      apiVersion,
+      extraManualUrl: String(params.extraManualUrl || "").trim()
+    });
+    const urlCount = Array.isArray(result == null ? void 0 : result.urls) ? result.urls.length : 0;
+    return {
+      ok: true,
+      actionType: type,
+      title: "XML Sitemap Rebuilt",
+      summary: `Generated ${urlCount} active URL(s) in your storefront sitemap inventory.`,
+      details: Array.isArray(result == null ? void 0 : result.urls) ? result.urls.slice(0, 4) : [],
+      liveReport: {
+        beforeScore: extractScanScore(beforeState),
+        afterScore: extractScanScore(beforeState),
+        scoreDelta: null,
+        checkedAt,
+        diffs: [
+          {
+            label: "Indexed Sitemap URLs",
+            before: `${beforeCount} URL(s)`,
+            after: `${urlCount} URL(s)`
+          }
+        ]
+      }
+    };
+  }
+  if (type === "RUN_PAGESPEED_TEST") {
+    const requestedStrat = String(params.strategy || "").toLowerCase();
+    const strategyMode = requestedStrat === "desktop" ? "desktop" : requestedStrat === "both" ? "both" : "mobile";
+    const normalizedUrl = normalizePageSpeedTargetUrl(shop, params.targetUrl || "");
+    const cfg = await deps.getEffectivePageSpeedConfig();
+    const prevMobilePerf = ((_q = (_p = (_o = beforeState == null ? void 0 : beforeState.pageSpeed) == null ? void 0 : _o.mobile) == null ? void 0 : _p.scores) == null ? void 0 : _q.performance) ?? null;
+    const prevDesktopPerf = ((_t = (_s = (_r = beforeState == null ? void 0 : beforeState.pageSpeed) == null ? void 0 : _r.desktop) == null ? void 0 : _s.scores) == null ? void 0 : _t.performance) ?? null;
+    const [mobileReport, desktopReport] = strategyMode === "both" ? await Promise.all([
+      deps.runLivePageSpeedTest({ url: normalizedUrl, shop, strategy: "mobile", apiKey: (cfg == null ? void 0 : cfg.apiKey) || "" }),
+      deps.runLivePageSpeedTest({ url: normalizedUrl, shop, strategy: "desktop", apiKey: (cfg == null ? void 0 : cfg.apiKey) || "" })
+    ]) : strategyMode === "desktop" ? [null, await deps.runLivePageSpeedTest({ url: normalizedUrl, shop, strategy: "desktop", apiKey: (cfg == null ? void 0 : cfg.apiKey) || "" })] : [await deps.runLivePageSpeedTest({ url: normalizedUrl, shop, strategy: "mobile", apiKey: (cfg == null ? void 0 : cfg.apiKey) || "" }), null];
+    const newHistoryItems = [
+      toCompactPageSpeedEntry(mobileReport),
+      toCompactPageSpeedEntry(desktopReport)
+    ].filter(Boolean);
+    const testedAt = (/* @__PURE__ */ new Date()).toISOString();
+    await deps.updateAppState(shop, (current) => {
+      const prevPs = current.pageSpeed || {};
+      const urlChanged = prevPs.lastTestedUrl && prevPs.lastTestedUrl !== normalizedUrl;
+      return {
+        ...current,
+        pageSpeed: {
+          ...prevPs,
+          lastTestedUrl: normalizedUrl,
+          lastTestedAt: testedAt,
+          mobile: mobileReport || (urlChanged ? null : prevPs.mobile),
+          desktop: desktopReport || (urlChanged ? null : prevPs.desktop),
+          history: [...newHistoryItems, ...Array.isArray(prevPs.history) ? prevPs.history : []].filter(Boolean).slice(0, 15)
+        }
+      };
+    });
+    const diffs = [];
+    if (mobileReport) {
+      diffs.push({
+        label: "Mobile Performance",
+        before: prevMobilePerf != null ? `${prevMobilePerf}/100` : "Untested",
+        after: `${((_u = mobileReport.scores) == null ? void 0 : _u.performance) ?? "N/A"}/100`
+      });
+      diffs.push({
+        label: "Mobile LCP / CLS",
+        before: ((_y = (_x = (_w = (_v = beforeState == null ? void 0 : beforeState.pageSpeed) == null ? void 0 : _v.mobile) == null ? void 0 : _w.metrics) == null ? void 0 : _x.lcp) == null ? void 0 : _y.displayValue) || "-",
+        after: `${((_A = (_z = mobileReport.metrics) == null ? void 0 : _z.lcp) == null ? void 0 : _A.displayValue) || "N/A"} · CLS ${((_C = (_B = mobileReport.metrics) == null ? void 0 : _B.cls) == null ? void 0 : _C.displayValue) || "N/A"}`
+      });
+    }
+    if (desktopReport) {
+      diffs.push({
+        label: "Desktop Performance",
+        before: prevDesktopPerf != null ? `${prevDesktopPerf}/100` : "Untested",
+        after: `${((_D = desktopReport.scores) == null ? void 0 : _D.performance) ?? "N/A"}/100`
+      });
+      diffs.push({
+        label: "Desktop LCP / CLS",
+        before: ((_H = (_G = (_F = (_E = beforeState == null ? void 0 : beforeState.pageSpeed) == null ? void 0 : _E.desktop) == null ? void 0 : _F.metrics) == null ? void 0 : _G.lcp) == null ? void 0 : _H.displayValue) || "-",
+        after: `${((_J = (_I = desktopReport.metrics) == null ? void 0 : _I.lcp) == null ? void 0 : _J.displayValue) || "N/A"} · CLS ${((_L = (_K = desktopReport.metrics) == null ? void 0 : _K.cls) == null ? void 0 : _L.displayValue) || "N/A"}`
+      });
+    }
+    const primaryReport = mobileReport || desktopReport;
+    const perf = ((_M = primaryReport == null ? void 0 : primaryReport.scores) == null ? void 0 : _M.performance) ?? "N/A";
+    const lcp = ((_O = (_N = primaryReport == null ? void 0 : primaryReport.metrics) == null ? void 0 : _N.lcp) == null ? void 0 : _O.displayValue) || "N/A";
+    const cls = ((_Q = (_P = primaryReport == null ? void 0 : primaryReport.metrics) == null ? void 0 : _P.cls) == null ? void 0 : _Q.displayValue) || "N/A";
+    return {
+      ok: true,
+      actionType: type,
+      title: `${strategyMode === "both" ? "Mobile & Desktop" : strategyMode === "desktop" ? "Desktop" : "Mobile"} PageSpeed Result`,
+      summary: `Performance ${perf}/100 · SEO ${((_R = primaryReport == null ? void 0 : primaryReport.scores) == null ? void 0 : _R.seo) ?? "N/A"}/100 · LCP ${lcp} · CLS ${cls} (${normalizedUrl}).`,
+      details: diffs.map((d) => `${d.label}: ${d.after}`),
+      liveReport: {
+        beforeScore: extractScanScore(beforeState),
+        afterScore: extractScanScore(beforeState),
+        scoreDelta: null,
+        checkedAt,
+        diffs
+      }
+    };
+  }
+  if (type === "TOGGLE_AUTOPILOT") {
+    const enabled = params.enabled !== false;
+    const prevEnabled = Boolean((_S = beforeState == null ? void 0 : beforeState.autopilot) == null ? void 0 : _S.enabled);
+    const autopilot = await deps.updateAutopilotSettings({
+      shop,
+      enabled,
+      optimizeMeta: params.optimizeMeta !== false,
+      optimizeAlt: params.optimizeAlt !== false
+    });
+    return {
+      ok: true,
+      actionType: type,
+      title: (autopilot == null ? void 0 : autopilot.enabled) ? "SEO Autopilot Enabled" : "SEO Autopilot Paused",
+      summary: (autopilot == null ? void 0 : autopilot.enabled) ? "Newly created/imported Shopify products will now be auto-optimized." : "Automatic optimization for newly created products has been paused.",
+      liveReport: {
+        beforeScore: extractScanScore(beforeState),
+        afterScore: extractScanScore(beforeState),
+        scoreDelta: null,
+        checkedAt,
+        diffs: [
+          {
+            label: "Autopilot Status",
+            before: prevEnabled ? "Enabled" : "Paused",
+            after: (autopilot == null ? void 0 : autopilot.enabled) ? "Enabled (Meta + ALT)" : "Paused"
+          }
+        ]
+      }
+    };
+  }
+  if (type === "ROLLBACK_REVISION") {
+    let targetRevId = String(params.revisionId || "").trim();
+    if (!targetRevId) {
+      const latest = await deps.findLatestRevision(shop);
+      targetRevId = (latest == null ? void 0 : latest.id) ? String(latest.id) : "";
+    }
+    if (!targetRevId) {
+      return {
+        ok: false,
+        actionType: type,
+        error: "No saved product SEO revision was found to rollback."
+      };
+    }
+    const rollbackResult = await deps.rollbackProductRevision({
+      shop,
+      storeDomain: storeDomain || shop,
+      token,
+      apiVersion,
+      revisionId: targetRevId
+    });
+    const afterState = shop ? await deps.getAppState(shop) : beforeState;
+    const scoreMeta = buildScoreReportMeta(beforeState, afterState);
+    return {
+      ok: Boolean((rollbackResult == null ? void 0 : rollbackResult.ok) ?? true),
+      actionType: type,
+      title: "Product SEO Rolled Back",
+      summary: `Reverted Shopify product to its previous revision${(rollbackResult == null ? void 0 : rollbackResult.redirectCreated) ? " and restored redirect safely" : ""}.`,
+      liveReport: {
+        ...scoreMeta,
+        checkedAt,
+        diffs: [
+          {
+            label: "Restored Revision",
+            before: targetRevId.slice(0, 12),
+            after: ((_T = rollbackResult == null ? void 0 : rollbackResult.normalized) == null ? void 0 : _T.title) || "Previous SEO state restored"
+          },
+          ...scoreMeta.afterScore != null ? [
+            {
+              label: "Store SEO Score",
+              before: scoreMeta.beforeScore != null ? `${scoreMeta.beforeScore}/100` : "-",
+              after: `${scoreMeta.afterScore}/100`
+            }
+          ] : []
+        ]
+      }
+    };
+  }
+  return {
+    ok: false,
+    actionType: type,
+    error: "Action could not be dispatched."
+  };
 }
 async function requireShopContext(request) {
   var _a2, _b;
@@ -8812,20 +14418,26 @@ async function getOneTimePurchases({
   });
   return ((_b = (_a2 = data2 == null ? void 0 : data2.currentAppInstallation) == null ? void 0 : _a2.oneTimePurchases) == null ? void 0 : _b.nodes) || [];
 }
-const links$c = () => [{
+const links$d = () => [{
   rel: "stylesheet",
   href: seoStyles
 }, {
   rel: "stylesheet",
   href: toastStyles
 }];
-const loader$e = async ({
+const loader$f = async ({
   request
 }) => {
   var _a2, _b;
   const url = new URL(request.url);
   let creditAccount = null;
   let storeControl = null;
+  let aiChatSeed = {
+    aiChatHistory: [],
+    storeSnapshot: null,
+    aiReady: false,
+    aiUnavailableReason: ""
+  };
   try {
     const {
       admin,
@@ -8855,6 +14467,19 @@ const loader$e = async ({
         await syncPlanSubscription(shop, true);
         creditAccount = await getOrCreateCreditAccount(shop, "PRO");
       }
+      const [appState, platformAi] = await Promise.all([getAppState(shop), getEffectivePlatformAiSettings()]);
+      const aiAllowedForStore = isFeatureAllowed(storeControl, "ai_features");
+      const aiReady = Boolean(AI_FEATURES_ENABLED && (platformAi == null ? void 0 : platformAi.isEnabled) && aiAllowedForStore);
+      const aiUnavailableReason = !AI_FEATURES_ENABLED ? "AI features are disabled in app settings." : !(platformAi == null ? void 0 : platformAi.isEnabled) ? "Platform Gemini AI is disabled in SuperAdmin." : !aiAllowedForStore ? "AI Mode is restricted for this store." : "";
+      aiChatSeed = {
+        aiChatHistory: Array.isArray(appState == null ? void 0 : appState.aiChatHistory) ? appState.aiChatHistory : [],
+        storeSnapshot: buildAiChatStoreContext({
+          shop,
+          appState
+        }),
+        aiReady,
+        aiUnavailableReason
+      };
     }
   } catch (error) {
     if (error instanceof Response) throw error;
@@ -8877,7 +14502,8 @@ const loader$e = async ({
       allowedFeatures: storeControl.allowedFeatures
     } : null,
     routeBlocked,
-    blockedFeatureLabel: (matchedFeature == null ? void 0 : matchedFeature.label) || ""
+    blockedFeatureLabel: (matchedFeature == null ? void 0 : matchedFeature.label) || "",
+    aiChatSeed
   };
 };
 const app = UNSAFE_withComponentProps(function App3() {
@@ -8886,8 +14512,10 @@ const app = UNSAFE_withComponentProps(function App3() {
     creditAccount,
     storeControl,
     routeBlocked,
-    blockedFeatureLabel
+    blockedFeatureLabel,
+    aiChatSeed
   } = useLoaderData();
+  const [aiDrawerOpen, setAiDrawerOpen] = useState(false);
   const isSuspended = (storeControl == null ? void 0 : storeControl.accessLevel) === "SUSPENDED";
   const allowedSet = new Set((storeControl == null ? void 0 : storeControl.allowedFeatures) || []);
   const canSee = (key) => {
@@ -8910,6 +14538,9 @@ const app = UNSAFE_withComponentProps(function App3() {
       children: [!isSuspended ? /* @__PURE__ */ jsx("s-link", {
         href: "/app",
         children: "Home"
+      }) : null, canSee("ai_features") ? /* @__PURE__ */ jsx("s-link", {
+        href: "/app/ai-mode",
+        children: "Full AI Mode"
       }) : null, canSee("seo_audit") ? /* @__PURE__ */ jsx("s-link", {
         href: "/app/seo-audit",
         children: "AI Audit"
@@ -8981,8 +14612,24 @@ const app = UNSAFE_withComponentProps(function App3() {
     }) : /* @__PURE__ */ jsxs(Fragment, {
       children: [/* @__PURE__ */ jsx(AppMenuShell, {
         creditAccount,
-        storeControl
-      }), /* @__PURE__ */ jsx(Outlet, {})]
+        storeControl,
+        canOpenAiMode: canSee("ai_features"),
+        aiModeOpen: aiDrawerOpen,
+        onOpenAiMode: () => setAiDrawerOpen(true)
+      }), /* @__PURE__ */ jsx(Outlet, {}), canSee("ai_features") ? /* @__PURE__ */ jsx(AiChatDrawer, {
+        open: aiDrawerOpen,
+        onClose: () => setAiDrawerOpen(false),
+        initialHistory: (aiChatSeed == null ? void 0 : aiChatSeed.aiChatHistory) || [],
+        initialSnapshot: (aiChatSeed == null ? void 0 : aiChatSeed.storeSnapshot) || null,
+        aiReady: Boolean(aiChatSeed == null ? void 0 : aiChatSeed.aiReady),
+        aiUnavailableReason: (aiChatSeed == null ? void 0 : aiChatSeed.aiUnavailableReason) || "",
+        creditAccount: {
+          availableCredits: (creditAccount == null ? void 0 : creditAccount.availableCredits) ?? 0,
+          totalCredits: (creditAccount == null ? void 0 : creditAccount.effectiveTotal) ?? PLAN_ALLOWANCES.FREE,
+          plan: (creditAccount == null ? void 0 : creditAccount.plan) || "FREE",
+          superAccess: Boolean(storeControl == null ? void 0 : storeControl.superAccess)
+        }
+      }) : null]
     }), /* @__PURE__ */ jsx(SeoToastViewport, {})]
   });
 });
@@ -8997,14 +14644,14 @@ const route16 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   ErrorBoundary: ErrorBoundary2,
   default: app,
   headers,
-  links: links$c,
-  loader: loader$e
+  links: links$d,
+  loader: loader$f
 }, Symbol.toStringTag, { value: "Module" }));
-const links$b = () => [{
+const links$c = () => [{
   rel: "stylesheet",
   href: seoStyles
 }];
-const loader$d = async ({
+const loader$e = async ({
   request
 }) => {
   const {
@@ -9247,10 +14894,10 @@ const route17 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   __proto__: null,
   action: action$b,
   default: app_urlOptimization,
-  links: links$b,
-  loader: loader$d
+  links: links$c,
+  loader: loader$e
 }, Symbol.toStringTag, { value: "Module" }));
-const links$a = () => [{
+const links$b = () => [{
   rel: "stylesheet",
   href: seoStyles
 }];
@@ -9265,27 +14912,65 @@ function defaultSummary() {
     needsFix: 0
   };
 }
+function defaultCompressionSummary() {
+  return {
+    total: 0,
+    totalBytes: 0,
+    totalFormatted: "Unknown",
+    knownSizeCount: 0,
+    critical: 0,
+    warning: 0,
+    needsOptimization: 0,
+    optimal: 0,
+    unchecked: 0,
+    oversizedCount: 0,
+    heavyCount: 0
+  };
+}
+function defaultCompressionStats() {
+  return {
+    totalImagesOptimized: 0,
+    totalBytesBefore: 0,
+    totalBytesAfter: 0,
+    totalBytesSaved: 0,
+    lastRunAt: null
+  };
+}
+function normalizeTab(value) {
+  return String(value || "").trim().toLowerCase() === "compression" ? "compression" : "alt";
+}
 function normalizeStatusFilter(value) {
   const clean = String(value || "all").trim().toLowerCase();
   if (clean === "needs-fix" || clean === "healthy") return clean;
   return "all";
 }
+function normalizeCompressionFilter(value) {
+  const clean = String(value || "all").trim().toLowerCase();
+  if (clean === "needs-optimization" || clean === "critical" || clean === "optimal") return clean;
+  return "all";
+}
 function normalizePageData(raw) {
   return {
+    tab: normalizeTab(raw == null ? void 0 : raw.tab),
     configError: (raw == null ? void 0 : raw.configError) || "",
     query: (raw == null ? void 0 : raw.query) || "",
     statusFilter: normalizeStatusFilter((raw == null ? void 0 : raw.statusFilter) || "all"),
+    compressionFilter: normalizeCompressionFilter((raw == null ? void 0 : raw.compressionFilter) || "all"),
     rows: (raw == null ? void 0 : raw.rows) || [],
     pagination: (raw == null ? void 0 : raw.pagination) || {
       nextPageInfo: "",
       previousPageInfo: ""
     },
     summary: (raw == null ? void 0 : raw.summary) || defaultSummary(),
+    compressionSummary: (raw == null ? void 0 : raw.compressionSummary) || defaultCompressionSummary(),
+    compressionStats: (raw == null ? void 0 : raw.compressionStats) || defaultCompressionStats(),
+    compressionHistory: (raw == null ? void 0 : raw.compressionHistory) || [],
+    lastCompressionRun: (raw == null ? void 0 : raw.lastCompressionRun) || null,
     history: (raw == null ? void 0 : raw.history) || [],
     lastRun: (raw == null ? void 0 : raw.lastRun) || null
   };
 }
-const loader$c = async ({
+const loader$d = async ({
   request
 }) => {
   const {
@@ -9295,20 +14980,28 @@ const loader$c = async ({
     configError
   } = await requireShopContext(request);
   const url = new URL(request.url);
+  const tab = normalizeTab(url.searchParams.get("tab"));
   const query = (url.searchParams.get("q") || "").trim();
   const pageInfo = url.searchParams.get("page_info") || "";
   const statusFilter = normalizeStatusFilter(url.searchParams.get("status") || "all");
+  const compressionFilter = normalizeCompressionFilter(url.searchParams.get("cstatus") || "all");
   if (configError) {
     return normalizePageData({
+      tab,
       configError,
       query,
       statusFilter,
+      compressionFilter,
       rows: [],
       pagination: {
         nextPageInfo: "",
         previousPageInfo: ""
       },
       summary: defaultSummary(),
+      compressionSummary: defaultCompressionSummary(),
+      compressionStats: defaultCompressionStats(),
+      compressionHistory: [],
+      lastCompressionRun: null,
       history: [],
       lastRun: null
     });
@@ -9322,29 +15015,43 @@ const loader$c = async ({
       limit: 25,
       pageInfo,
       query,
-      statusFilter
+      statusFilter,
+      tab,
+      compressionFilter
     });
     return normalizePageData({
       configError: "",
+      tab: result.tab,
       query,
       statusFilter: result.statusFilter,
+      compressionFilter: result.compressionFilter,
       rows: result.rows,
       pagination: result.pagination,
       summary: result.summary,
+      compressionSummary: result.compressionSummary,
+      compressionStats: result.compressionStats,
+      compressionHistory: result.compressionHistory,
+      lastCompressionRun: result.lastCompressionRun,
       history: result.history,
       lastRun: result.lastRun
     });
   } catch (error) {
     return normalizePageData({
+      tab,
       configError: (error == null ? void 0 : error.message) || "Unable to load Shopify product images.",
       query,
       statusFilter,
+      compressionFilter,
       rows: [],
       pagination: {
         nextPageInfo: "",
         previousPageInfo: ""
       },
       summary: defaultSummary(),
+      compressionSummary: defaultCompressionSummary(),
+      compressionStats: defaultCompressionStats(),
+      compressionHistory: [],
+      lastCompressionRun: null,
       history: [],
       lastRun: null
     });
@@ -9401,6 +15108,34 @@ const action$a = async ({
         intent
       };
     }
+    if (intent === "previewCompress") {
+      const options = JSON.parse(String(formData.get("options") || "{}"));
+      const result = await previewImageCompressionBatch({
+        rows,
+        compressionOptions: options
+      });
+      return {
+        ...result,
+        intent
+      };
+    }
+    if (intent === "compressImages") {
+      const options = JSON.parse(String(formData.get("options") || "{}"));
+      const storeControl = await getOrCreateStoreControl(shop);
+      const result = await applyImageCompressionBatch({
+        shop,
+        storeDomain: shop,
+        token,
+        apiVersion,
+        rows,
+        compressionOptions: options,
+        hasSuperAccess: Boolean(storeControl == null ? void 0 : storeControl.superAccess)
+      });
+      return {
+        ...result,
+        intent
+      };
+    }
     return {
       ok: false,
       error: "Unknown action."
@@ -9425,6 +15160,20 @@ function statusLabel(status) {
   if (status.tooShort) return "Too short";
   if (!status.ideal) return "Can improve";
   return "Healthy";
+}
+function compressionTone(health) {
+  if (!health) return "warning";
+  if (health.status === "critical") return "critical";
+  if (health.status === "needs-optimization") return "warning";
+  if (health.status === "optimal") return "ok";
+  return "warning";
+}
+function compressionLabel(health) {
+  if (!health) return "Unchecked";
+  if (health.status === "critical") return "Critical Weight";
+  if (health.status === "needs-optimization") return "Needs Compression";
+  if (health.status === "optimal") return "PageSpeed Optimal";
+  return "Size Unknown";
 }
 function formatDate(value) {
   if (!value) return "N/A";
@@ -9451,16 +15200,18 @@ function toPatternAlt(row, pattern) {
   return normalized.length > 125 ? normalized.slice(0, 125).trimEnd() : normalized;
 }
 const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRoute() {
-  var _a2, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m;
+  var _a2, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z;
   const loaderData = useLoaderData();
   const actionFetcher = useFetcher();
   const listFetcher = useFetcher();
   const aiFetcher = useFetcher();
   const selectAllRef = useRef(null);
   const [pageData, setPageData] = useState(() => normalizePageData(loaderData));
+  const [activeTab, setActiveTab] = useState(() => normalizeTab(loaderData.tab));
   const [rows, setRows] = useState(() => loaderData.rows || []);
   const [searchQuery, setSearchQuery] = useState(loaderData.query || "");
   const [statusFilter, setStatusFilter] = useState(loaderData.statusFilter || "all");
+  const [compressionFilter, setCompressionFilter] = useState(loaderData.compressionFilter || "all");
   const [selected, setSelected] = useState({});
   const [localError, setLocalError] = useState("");
   const [bulkPattern, setBulkPattern] = useState("{title} - product image view {position}");
@@ -9468,14 +15219,33 @@ const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRout
   const [pendingFixRows, setPendingFixRows] = useState([]);
   const [aiImageId, setAiImageId] = useState("");
   const [lastVisionImageId, setLastVisionImageId] = useState("");
+  const [preset, setPreset] = useState("pagespeed_balanced");
+  const [customMaxWidth, setCustomMaxWidth] = useState(2048);
+  const [customQuality, setCustomQuality] = useState(80);
+  const [customFormat, setCustomFormat] = useState("smart");
+  const [customTargetMaxKb, setCustomTargetMaxKb] = useState(0);
+  const [compressionPreviews, setCompressionPreviews] = useState({});
+  const [compressionAppliedById, setCompressionAppliedById] = useState({});
+  const effectiveOptions = useMemo(() => normalizeCompressionOptions({
+    preset,
+    maxWidth: customMaxWidth,
+    maxHeight: customMaxWidth,
+    quality: customQuality,
+    format: customFormat,
+    targetMaxKb: customTargetMaxKb
+  }), [preset, customMaxWidth, customQuality, customFormat, customTargetMaxKb]);
   const syncPageData = useCallback((raw) => {
     const next = normalizePageData(raw);
     setPageData(next);
+    setActiveTab(next.tab);
     setRows(next.rows);
     setSearchQuery(next.query);
     setStatusFilter(next.statusFilter);
+    setCompressionFilter(next.compressionFilter);
     setSelected({});
     setLocalError("");
+    setCompressionPreviews({});
+    setCompressionAppliedById({});
   }, []);
   useEffect(() => {
     syncPageData(loaderData);
@@ -9510,6 +15280,68 @@ const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRout
       setPendingFixRows([]);
     }
   }, [actionFetcher.data, pendingFixRows]);
+  useEffect(() => {
+    var _a3, _b2;
+    if (((_a3 = actionFetcher.data) == null ? void 0 : _a3.intent) === "previewCompress" && ((_b2 = actionFetcher.data) == null ? void 0 : _b2.ok)) {
+      const nextMap = {};
+      for (const item of actionFetcher.data.previews || []) {
+        if (item == null ? void 0 : item.id) nextMap[String(item.id)] = item;
+      }
+      setCompressionPreviews(nextMap);
+    }
+  }, [actionFetcher.data]);
+  useEffect(() => {
+    var _a3, _b2, _c2;
+    if (((_a3 = actionFetcher.data) == null ? void 0 : _a3.intent) === "compressImages") {
+      if (((_b2 = actionFetcher.data) == null ? void 0 : _b2.creditsRemaining) !== void 0) {
+        dispatchCreditsUpdate({
+          availableCredits: actionFetcher.data.creditsRemaining,
+          plan: actionFetcher.data.plan,
+          superAccess: Boolean(actionFetcher.data.superAccess)
+        });
+      }
+      if (Array.isArray((_c2 = actionFetcher.data) == null ? void 0 : _c2.results)) {
+        const resultsById = new Map(actionFetcher.data.results.map((entry2) => [String(entry2.id), entry2]));
+        if (resultsById.size > 0) {
+          const appliedNext = {};
+          setRows((current) => current.map((row) => {
+            const res = resultsById.get(String(row.id));
+            if (!res) return row;
+            if (res.ok && !res.skipped) {
+              const newId = String(res.newImageId || row.id);
+              appliedNext[newId] = res;
+              return {
+                ...row,
+                id: newId,
+                imageUrl: res.newImageUrl || row.imageUrl,
+                width: res.width || row.width,
+                height: res.height || row.height,
+                fileSizeBytes: res.compressedBytes,
+                fileSizeLabel: formatBytes$1(res.compressedBytes),
+                format: res.format || row.format,
+                sizeHealth: res.sizeHealth || analyzeImageSizeHealth({
+                  width: res.width || row.width,
+                  height: res.height || row.height,
+                  fileSizeBytes: res.compressedBytes,
+                  format: res.format || row.format
+                })
+              };
+            }
+            if (res.ok && res.skipped) {
+              appliedNext[String(row.id)] = res;
+            }
+            return row;
+          }));
+          setCompressionAppliedById((prev) => ({
+            ...prev,
+            ...appliedNext
+          }));
+          setCompressionPreviews({});
+          setSelected({});
+        }
+      }
+    }
+  }, [actionFetcher.data]);
   const checkedStatusById = useMemo(() => {
     var _a3, _b2;
     return ((_a3 = actionFetcher.data) == null ? void 0 : _a3.intent) === "checkAlt" && ((_b2 = actionFetcher.data) == null ? void 0 : _b2.ok) ? actionFetcher.data.statusById || {} : {};
@@ -9519,6 +15351,24 @@ const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRout
     if ((_a3 = actionFetcher.data) == null ? void 0 : _a3.summary) return actionFetcher.data.summary;
     return pageData.summary || defaultSummary();
   }, [actionFetcher.data, pageData.summary]);
+  const liveCompressionSummary = useMemo(() => summarizeCompressionRows(rows), [rows]);
+  const compressionStats = useMemo(() => {
+    var _a3;
+    if ((_a3 = actionFetcher.data) == null ? void 0 : _a3.compressionStats) return actionFetcher.data.compressionStats;
+    return pageData.compressionStats || defaultCompressionStats();
+  }, [actionFetcher.data, pageData.compressionStats]);
+  const compressionHistory = useMemo(() => {
+    var _a3;
+    if (Array.isArray((_a3 = actionFetcher.data) == null ? void 0 : _a3.compressionHistory)) {
+      return actionFetcher.data.compressionHistory;
+    }
+    return pageData.compressionHistory || [];
+  }, [actionFetcher.data, pageData.compressionHistory]);
+  const lastCompressionRun = useMemo(() => {
+    var _a3;
+    if ((_a3 = actionFetcher.data) == null ? void 0 : _a3.lastCompressionRun) return actionFetcher.data.lastCompressionRun;
+    return pageData.lastCompressionRun;
+  }, [actionFetcher.data, pageData.lastCompressionRun]);
   const history = useMemo(() => {
     var _a3;
     if (Array.isArray((_a3 = actionFetcher.data) == null ? void 0 : _a3.history)) return actionFetcher.data.history;
@@ -9574,6 +15424,33 @@ const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRout
       percent: Math.round(segment.value / total * 100)
     }));
   }, [summary]);
+  const compressionSegments = useMemo(() => {
+    const total = Math.max(1, Number(liveCompressionSummary.total || 0));
+    return [{
+      key: "optimal",
+      label: "Optimal (<=200 KB)",
+      value: Number(liveCompressionSummary.optimal || 0),
+      color: "#13795b"
+    }, {
+      key: "warning",
+      label: "Needs Compression",
+      value: Number(liveCompressionSummary.warning || 0),
+      color: "#c77d00"
+    }, {
+      key: "critical",
+      label: "Critical Weight / Res",
+      value: Number(liveCompressionSummary.critical || 0),
+      color: "#a33636"
+    }, {
+      key: "unchecked",
+      label: "Unchecked",
+      value: Number(liveCompressionSummary.unchecked || 0),
+      color: "#64748b"
+    }].map((segment) => ({
+      ...segment,
+      percent: Math.round(segment.value / total * 100)
+    }));
+  }, [liveCompressionSummary]);
   function patchRow(id, patch) {
     setRows((current) => current.map((row) => row.id === id ? {
       ...row,
@@ -9622,9 +15499,14 @@ const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRout
       action: "/app/api/ai"
     });
   }
-  const updateAddressBar = useCallback((query, pageInfo = "", filter = "all") => {
+  const updateAddressBar = useCallback((query, pageInfo = "", filter = "all", tab = "alt", cFilter = "all") => {
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
+    if (tab === "compression") {
+      url.searchParams.set("tab", "compression");
+    } else {
+      url.searchParams.delete("tab");
+    }
     if (query) {
       url.searchParams.set("q", query);
     } else {
@@ -9640,17 +15522,33 @@ const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRout
     } else {
       url.searchParams.delete("status");
     }
+    if (cFilter && cFilter !== "all" && tab === "compression") {
+      url.searchParams.set("cstatus", cFilter);
+    } else {
+      url.searchParams.delete("cstatus");
+    }
     window.history.pushState({}, "", `${url.pathname}${url.search}`);
   }, []);
-  const loadList = useCallback((query, pageInfo = "", filter = "all") => {
+  const loadList = useCallback((query, pageInfo = "", filter = "all", nextTab = activeTab, nextCFilter = compressionFilter) => {
+    const normalizedTab = normalizeTab(nextTab);
     const params = new URLSearchParams();
+    if (normalizedTab === "compression") params.set("tab", "compression");
     if (query) params.set("q", query);
     if (pageInfo) params.set("page_info", pageInfo);
     if (filter && filter !== "all") params.set("status", filter);
+    if (normalizedTab === "compression" && nextCFilter && nextCFilter !== "all") {
+      params.set("cstatus", nextCFilter);
+    }
     const href = params.toString() ? `/app/image-optimizer?${params.toString()}` : "/app/image-optimizer";
     listFetcher.load(href);
-    updateAddressBar(query, pageInfo, filter);
-  }, [listFetcher, updateAddressBar]);
+    updateAddressBar(query, pageInfo, filter, normalizedTab, nextCFilter);
+  }, [activeTab, compressionFilter, listFetcher, updateAddressBar]);
+  function switchTab(nextTab) {
+    const normalized = normalizeTab(nextTab);
+    if (normalized === activeTab) return;
+    setActiveTab(normalized);
+    loadList(searchQuery.trim(), "", statusFilter, normalized, compressionFilter);
+  }
   function submitCheck() {
     setLocalError("");
     setActiveIntent("checkAlt");
@@ -9694,9 +15592,26 @@ const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRout
   function selectIssuesOnly() {
     const next = {};
     for (const row of rows) {
-      const status = checkedStatusById[row.id] || validateImageAlt(row.altText);
-      const needsFix = !status.valid || status.generic || status.tooShort;
-      if (needsFix) {
+      if (activeTab === "compression") {
+        const health = row.sizeHealth || analyzeImageSizeHealth(row);
+        if (health.needsOptimization) {
+          next[row.id] = true;
+        }
+      } else {
+        const status = checkedStatusById[row.id] || validateImageAlt(row.altText);
+        const needsFix = !status.valid || status.generic || status.tooShort;
+        if (needsFix) {
+          next[row.id] = true;
+        }
+      }
+    }
+    setSelected(next);
+  }
+  function selectCriticalCompressionOnly() {
+    const next = {};
+    for (const row of rows) {
+      const health = row.sizeHealth || analyzeImageSizeHealth(row);
+      if (health.status === "critical") {
         next[row.id] = true;
       }
     }
@@ -9738,17 +15653,89 @@ const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRout
     }));
     submitFix(payloadRows);
   }
+  function serializeCompressionRows(list2) {
+    return list2.map((row) => ({
+      id: row.id,
+      productId: row.productId,
+      productTitle: row.productTitle,
+      productHandle: row.productHandle,
+      position: row.position,
+      altText: row.altText || "",
+      imageUrl: row.imageUrl,
+      width: row.width,
+      height: row.height,
+      variantIds: row.variantIds || []
+    }));
+  }
+  function runCompressionPreview() {
+    const chosen = rows.filter((row) => selected[row.id]);
+    const targets = chosen.length ? chosen : rows;
+    if (!targets.length) {
+      setLocalError("No product images loaded on this page to analyze.");
+      return;
+    }
+    setLocalError("");
+    setActiveIntent("previewCompress");
+    actionFetcher.submit({
+      intent: "previewCompress",
+      options: JSON.stringify(effectiveOptions),
+      rows: JSON.stringify(serializeCompressionRows(targets))
+    }, {
+      method: "post"
+    });
+  }
+  function runCompressSelected() {
+    const chosen = rows.filter((row) => selected[row.id]);
+    if (!chosen.length) {
+      setLocalError("Select at least one image row before compressing.");
+      return;
+    }
+    setLocalError("");
+    setActiveIntent("compressImages");
+    actionFetcher.submit({
+      intent: "compressImages",
+      options: JSON.stringify(effectiveOptions),
+      rows: JSON.stringify(serializeCompressionRows(chosen))
+    }, {
+      method: "post"
+    });
+  }
+  function runCompressHeavyOnPage() {
+    const heavy = rows.filter((row) => (row.sizeHealth || analyzeImageSizeHealth(row)).needsOptimization);
+    const targets = heavy.length ? heavy : rows;
+    if (!targets.length) {
+      setLocalError("No images available on this page to compress.");
+      return;
+    }
+    const nextSel = {};
+    for (const row of targets) nextSel[row.id] = true;
+    setSelected(nextSel);
+    setLocalError("");
+    setActiveIntent("compressImages");
+    actionFetcher.submit({
+      intent: "compressImages",
+      options: JSON.stringify(effectiveOptions),
+      rows: JSON.stringify(serializeCompressionRows(targets))
+    }, {
+      method: "post"
+    });
+  }
   function handleSearchSubmit(event) {
     event.preventDefault();
-    loadList(searchQuery.trim(), "", statusFilter);
+    loadList(searchQuery.trim(), "", statusFilter, activeTab, compressionFilter);
   }
   function handleStatusChange(event) {
     const nextFilter = normalizeStatusFilter(event.target.value);
     setStatusFilter(nextFilter);
-    loadList(searchQuery.trim(), "", nextFilter);
+    loadList(searchQuery.trim(), "", nextFilter, activeTab, compressionFilter);
+  }
+  function handleCompressionFilterChange(event) {
+    const nextCFilter = normalizeCompressionFilter(event.target.value);
+    setCompressionFilter(nextCFilter);
+    loadList(searchQuery.trim(), "", statusFilter, activeTab, nextCFilter);
   }
   const actionBusy = actionFetcher.state !== "idle";
-  const liveStatus = actionBusy ? activeIntent === "fixAlt" ? "Updating ALT..." : "Checking ALT..." : ((_a2 = actionFetcher.data) == null ? void 0 : _a2.error) ? "Last run failed" : ((_b = actionFetcher.data) == null ? void 0 : _b.ok) ? "Last run successful" : "Idle";
+  const liveStatus = actionBusy ? activeIntent === "fixAlt" ? "Updating ALT..." : activeIntent === "previewCompress" ? "Estimating KB Savings..." : activeIntent === "compressImages" ? "Compressing & Uploading..." : "Checking ALT..." : ((_a2 = actionFetcher.data) == null ? void 0 : _a2.error) ? "Last run failed" : ((_b = actionFetcher.data) == null ? void 0 : _b.ok) ? "Last run successful" : "Idle";
   const liveStatusTone = ((_c = actionFetcher.data) == null ? void 0 : _c.error) ? "critical" : actionBusy ? "warning" : "ok";
   return /* @__PURE__ */ jsxs(Fragment, {
     children: [/* @__PURE__ */ jsx("ui-title-bar", {
@@ -9757,6 +15744,33 @@ const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRout
       className: "seo-wrap seo-grid",
       children: [/* @__PURE__ */ jsx(WorkspaceSubnav, {
         group: "products"
+      }), /* @__PURE__ */ jsxs("div", {
+        className: "section-card image-mode-switch",
+        children: [/* @__PURE__ */ jsxs("div", {
+          className: "image-mode-tabs",
+          role: "tablist",
+          "aria-label": "Image Optimizer Mode",
+          children: [/* @__PURE__ */ jsx("button", {
+            type: "button",
+            role: "tab",
+            "aria-selected": activeTab === "compression",
+            className: activeTab === "compression" ? "seo-button" : "seo-button secondary",
+            onClick: () => switchTab("compression"),
+            disabled: listFetcher.state !== "idle",
+            children: "🗜️ Image Size Compression (PageSpeed)"
+          }), /* @__PURE__ */ jsx("button", {
+            type: "button",
+            role: "tab",
+            "aria-selected": activeTab === "alt",
+            className: activeTab === "alt" ? "seo-button" : "seo-button secondary",
+            onClick: () => switchTab("alt"),
+            disabled: listFetcher.state !== "idle",
+            children: "🖼️ Image ALT & Gemini Vision"
+          })]
+        }), /* @__PURE__ */ jsx("span", {
+          className: activeTab === "compression" ? "pill pill-good" : "pill pill-info",
+          children: activeTab === "compression" ? "⚡ Fixed Deterministic Engine • 0 AI Tokens" : "Rule Suggestions (0 tok) + Gemini Vision (4 tok)"
+        })]
       }), pageData.configError ? /* @__PURE__ */ jsx("div", {
         className: "error-box",
         children: pageData.configError
@@ -9785,7 +15799,27 @@ const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRout
           style: {
             maxWidth: 320
           }
-        }), /* @__PURE__ */ jsxs("select", {
+        }), activeTab === "compression" ? /* @__PURE__ */ jsxs("select", {
+          className: "seo-input",
+          value: compressionFilter,
+          onChange: handleCompressionFilterChange,
+          style: {
+            maxWidth: 240
+          },
+          children: [/* @__PURE__ */ jsx("option", {
+            value: "all",
+            children: "All sizes"
+          }), /* @__PURE__ */ jsx("option", {
+            value: "needs-optimization",
+            children: "Needs compression only"
+          }), /* @__PURE__ */ jsx("option", {
+            value: "critical",
+            children: "Critical weight (>600 KB / >3000px)"
+          }), /* @__PURE__ */ jsx("option", {
+            value: "optimal",
+            children: "Already optimal"
+          })]
+        }) : /* @__PURE__ */ jsxs("select", {
           className: "seo-input",
           value: statusFilter,
           onChange: handleStatusChange,
@@ -9808,368 +15842,898 @@ const app_imageOptimizer = UNSAFE_withComponentProps(function ImageOptimizerRout
           disabled: listFetcher.state !== "idle",
           children: listFetcher.state !== "idle" ? "Loading..." : "Search"
         })]
-      }), /* @__PURE__ */ jsxs("div", {
-        className: "seo-grid grid-3",
+      }), activeTab === "compression" ? /* @__PURE__ */ jsxs(Fragment, {
         children: [/* @__PURE__ */ jsxs("div", {
-          className: "metric-card",
-          children: [/* @__PURE__ */ jsx("p", {
-            className: "metric-label",
-            children: "Live Status"
-          }), /* @__PURE__ */ jsx("h3", {
-            children: liveStatus
-          }), /* @__PURE__ */ jsx("small", {
-            className: `issue-chip ${liveStatusTone}`,
-            children: actionBusy ? "Running" : "Ready"
-          }), /* @__PURE__ */ jsxs("p", {
-            className: "metric-help",
-            children: ["Last run: ", formatDate(lastRun == null ? void 0 : lastRun.createdAt)]
+          className: "seo-grid grid-4",
+          children: [/* @__PURE__ */ jsxs("div", {
+            className: "metric-card",
+            children: [/* @__PURE__ */ jsx("p", {
+              className: "metric-label",
+              children: "Engine Status"
+            }), /* @__PURE__ */ jsx("h3", {
+              children: liveStatus
+            }), /* @__PURE__ */ jsx("small", {
+              className: `issue-chip ${liveStatusTone}`,
+              children: actionBusy ? "Processing" : "Ready (0 AI tok)"
+            }), /* @__PURE__ */ jsxs("p", {
+              className: "metric-help",
+              children: ["Last run: ", formatDate(lastCompressionRun == null ? void 0 : lastCompressionRun.createdAt)]
+            })]
+          }), /* @__PURE__ */ jsxs("div", {
+            className: "metric-card",
+            children: [/* @__PURE__ */ jsx("p", {
+              className: "metric-label",
+              children: "Total Store Savings"
+            }), /* @__PURE__ */ jsx("h3", {
+              children: formatBytes$1(compressionStats.totalBytesSaved || 0)
+            }), /* @__PURE__ */ jsxs("p", {
+              className: "metric-help",
+              children: [compressionStats.totalImagesOptimized || 0, " product image(s) compressed cleanly"]
+            })]
+          }), /* @__PURE__ */ jsxs("div", {
+            className: "metric-card",
+            children: [/* @__PURE__ */ jsx("p", {
+              className: "metric-label",
+              children: "Current Page Weight"
+            }), /* @__PURE__ */ jsx("h3", {
+              children: liveCompressionSummary.totalFormatted
+            }), /* @__PURE__ */ jsxs("p", {
+              className: "metric-help",
+              children: [liveCompressionSummary.needsOptimization || 0, " heavy (", liveCompressionSummary.critical || 0, " critical)"]
+            })]
+          }), /* @__PURE__ */ jsxs("div", {
+            className: "metric-card",
+            children: [/* @__PURE__ */ jsx("p", {
+              className: "metric-label",
+              children: "Selection"
+            }), /* @__PURE__ */ jsxs("h3", {
+              children: [selectedCount, " Selected"]
+            }), /* @__PURE__ */ jsx("p", {
+              className: "metric-help",
+              children: "Select images to estimate savings or compress live."
+            })]
           })]
         }), /* @__PURE__ */ jsxs("div", {
-          className: "metric-card",
-          children: [/* @__PURE__ */ jsx("p", {
-            className: "metric-label",
-            children: "Current Results"
-          }), /* @__PURE__ */ jsxs("h3", {
-            children: [summary.needsFix || 0, " Need Fixes"]
-          }), /* @__PURE__ */ jsxs("p", {
-            className: "metric-help",
-            children: [summary.ideal || 0, " healthy out of ", summary.total || 0, " checked rows"]
+          className: "section-card",
+          children: [/* @__PURE__ */ jsxs("div", {
+            className: "toolbar",
+            style: {
+              justifyContent: "space-between"
+            },
+            children: [/* @__PURE__ */ jsx("h3", {
+              style: {
+                margin: 0
+              },
+              children: "PageSpeed Image Weight Breakdown"
+            }), /* @__PURE__ */ jsxs("small", {
+              children: [liveCompressionSummary.total || 0, " image(s) inspected"]
+            })]
+          }), /* @__PURE__ */ jsx("div", {
+            className: "image-results-track",
+            children: compressionSegments.map((segment) => /* @__PURE__ */ jsx("div", {
+              className: "image-results-segment",
+              style: {
+                width: `${segment.percent}%`,
+                background: segment.color
+              },
+              title: `${segment.label}: ${segment.value}`
+            }, segment.key))
+          }), /* @__PURE__ */ jsx("div", {
+            className: "image-results-grid",
+            children: compressionSegments.map((segment) => /* @__PURE__ */ jsxs("small", {
+              children: [/* @__PURE__ */ jsxs("strong", {
+                children: [segment.label, ":"]
+              }), " ", segment.value, " (", segment.percent, "%)"]
+            }, `comp-legend-${segment.key}`))
           })]
         }), /* @__PURE__ */ jsxs("div", {
-          className: "metric-card",
-          children: [/* @__PURE__ */ jsx("p", {
-            className: "metric-label",
-            children: "Selection"
-          }), /* @__PURE__ */ jsxs("h3", {
-            children: [selectedCount, " Selected"]
-          }), /* @__PURE__ */ jsx("p", {
-            className: "metric-help",
-            children: "Use Select all or Select issues for bulk updates."
-          })]
-        })]
-      }), /* @__PURE__ */ jsxs("div", {
-        className: "section-card",
-        children: [/* @__PURE__ */ jsxs("div", {
-          className: "toolbar",
-          style: {
-            justifyContent: "space-between"
-          },
-          children: [/* @__PURE__ */ jsx("h3", {
+          className: "section-card seo-grid",
+          children: [/* @__PURE__ */ jsx("div", {
+            className: "toolbar",
             style: {
-              margin: 0
+              justifyContent: "space-between",
+              marginBottom: 0
             },
-            children: "Result Chart"
-          }), /* @__PURE__ */ jsxs("small", {
-            children: [summary.total || 0, " row(s) in current view"]
-          })]
-        }), /* @__PURE__ */ jsx("div", {
-          className: "image-results-track",
-          children: resultSegments.map((segment) => /* @__PURE__ */ jsx("div", {
-            className: "image-results-segment",
-            style: {
-              width: `${segment.percent}%`,
-              background: segment.color
-            },
-            title: `${segment.label}: ${segment.value}`
-          }, segment.key))
-        }), /* @__PURE__ */ jsx("div", {
-          className: "image-results-grid",
-          children: resultSegments.map((segment) => /* @__PURE__ */ jsxs("small", {
-            children: [/* @__PURE__ */ jsxs("strong", {
-              children: [segment.label, ":"]
-            }), " ", segment.value, " (", segment.percent, "%)"]
-          }, `legend-${segment.key}`))
-        })]
-      }), /* @__PURE__ */ jsxs("div", {
-        className: "section-card",
-        children: [/* @__PURE__ */ jsxs("div", {
-          className: "toolbar",
-          style: {
-            justifyContent: "space-between"
-          },
-          children: [/* @__PURE__ */ jsx("h3", {
-            style: {
-              margin: 0
-            },
-            children: "Update All ALT At Once"
-          }), /* @__PURE__ */ jsxs("small", {
-            children: ["Tokens: ", "{title}", ", ", "{position}", ", ", "{handle}"]
-          })]
-        }), /* @__PURE__ */ jsxs("label", {
-          className: "editor-field",
-          children: [/* @__PURE__ */ jsx("span", {
-            children: "Bulk ALT pattern"
-          }), /* @__PURE__ */ jsx("input", {
-            className: "seo-input",
-            value: bulkPattern,
-            onChange: (event) => setBulkPattern(event.target.value),
-            placeholder: "{title} - product image view {position}"
-          })]
-        }), /* @__PURE__ */ jsxs("div", {
-          className: "toolbar",
-          children: [/* @__PURE__ */ jsx("button", {
-            className: "seo-button secondary",
-            type: "button",
-            onClick: applyPatternToAllSuggestions,
-            children: "Apply pattern to all suggestions"
-          }), /* @__PURE__ */ jsx("button", {
-            className: "seo-button secondary",
-            type: "button",
-            onClick: () => setSelectAll(true),
-            children: "Select all on page"
-          }), /* @__PURE__ */ jsx("button", {
-            className: "seo-button secondary",
-            type: "button",
-            onClick: () => setSelectAll(false),
-            children: "Clear selection"
-          }), /* @__PURE__ */ jsx("button", {
-            className: "seo-button secondary",
-            type: "button",
-            onClick: selectIssuesOnly,
-            children: "Select issues"
-          }), /* @__PURE__ */ jsx("button", {
-            className: "seo-button secondary",
-            type: "button",
-            onClick: submitCheck,
-            children: "Check image ALT"
-          }), /* @__PURE__ */ jsx("button", {
-            className: "seo-button",
-            type: "button",
-            onClick: applySelectedFixes,
-            children: "Fix selected ALT"
-          }), /* @__PURE__ */ jsx("button", {
-            className: "seo-button",
-            type: "button",
-            onClick: applyAllVisibleFixes,
-            children: "Update all visible ALT"
-          })]
-        })]
-      }), ((_g = actionFetcher.data) == null ? void 0 : _g.ok) && ((_h = actionFetcher.data) == null ? void 0 : _h.intent) === "checkAlt" ? /* @__PURE__ */ jsxs("div", {
-        className: "status-banner",
-        "data-toast": "info",
-        "data-toast-title": "Image ALT Audit",
-        children: [/* @__PURE__ */ jsx("strong", {
-          children: "Check complete:"
-        }), " ", ((_i = actionFetcher.data.summary) == null ? void 0 : _i.needsFix) || 0, " need fixes, ", ((_j = actionFetcher.data.summary) == null ? void 0 : _j.ideal) || 0, " are healthy,", " ", ((_k = actionFetcher.data.summary) == null ? void 0 : _k.missing) || 0, " missing ALT."]
-      }) : null, ((_l = actionFetcher.data) == null ? void 0 : _l.ok) && ((_m = actionFetcher.data) == null ? void 0 : _m.intent) === "fixAlt" ? /* @__PURE__ */ jsxs("div", {
-        className: "status-banner banner-good",
-        "data-toast-title": "Image ALT Updated",
-        children: ["Updated ALT text for ", actionFetcher.data.updated || 0, " image", actionFetcher.data.updated === 1 ? "" : "s", "."]
-      }) : null, !rows.length ? /* @__PURE__ */ jsx("div", {
-        className: "empty-box",
-        children: "No product images were found in the current filter."
-      }) : /* @__PURE__ */ jsx("div", {
-        className: "table-card table-wrap image-optimizer-table",
-        children: /* @__PURE__ */ jsxs("table", {
-          children: [/* @__PURE__ */ jsx("thead", {
-            children: /* @__PURE__ */ jsxs("tr", {
-              children: [/* @__PURE__ */ jsx("th", {
-                children: /* @__PURE__ */ jsx("input", {
-                  ref: selectAllRef,
-                  type: "checkbox",
-                  checked: allVisibleSelected,
-                  onChange: (event) => setSelectAll(event.target.checked),
-                  "aria-label": "Select all images on this page"
-                })
-              }), /* @__PURE__ */ jsx("th", {
-                children: "Image"
-              }), /* @__PURE__ */ jsx("th", {
-                children: "Product"
-              }), /* @__PURE__ */ jsx("th", {
-                children: "Current ALT"
-              }), /* @__PURE__ */ jsx("th", {
-                children: "Suggested ALT"
-              }), /* @__PURE__ */ jsx("th", {
-                children: "Status"
+            children: /* @__PURE__ */ jsxs("div", {
+              children: [/* @__PURE__ */ jsx("h3", {
+                style: {
+                  margin: 0
+                },
+                children: "Fixed PageSpeed Compression Rules (Deterministic)"
+              }), /* @__PURE__ */ jsx("small", {
+                style: {
+                  color: "var(--seo-muted)"
+                },
+                children: "Strips EXIF/XMP metadata, normalizes orientation, caps excessive dimensions, and skips re-upload if a file is already smaller. Variants, gallery position & ALT text stay intact."
               })]
             })
-          }), /* @__PURE__ */ jsx("tbody", {
-            children: rows.map((row) => {
-              var _a3;
-              const status = checkedStatusById[row.id] || validateImageAlt(row.altText);
-              const tone = statusTone(status);
-              return /* @__PURE__ */ jsxs("tr", {
-                children: [/* @__PURE__ */ jsx("td", {
-                  children: /* @__PURE__ */ jsx("input", {
-                    type: "checkbox",
-                    checked: Boolean(selected[row.id]),
-                    onChange: (event) => setSelected((current) => ({
-                      ...current,
-                      [row.id]: event.target.checked
-                    }))
+          }), /* @__PURE__ */ jsx("div", {
+            className: "compression-preset-grid",
+            children: Object.values(COMPRESSION_PRESETS).map((item) => {
+              const isActive = preset === item.id;
+              return /* @__PURE__ */ jsxs("button", {
+                type: "button",
+                className: `compression-preset-card ${isActive ? "active" : ""}`,
+                onClick: () => setPreset(item.id),
+                children: [/* @__PURE__ */ jsx("div", {
+                  style: {
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 6
+                  },
+                  children: /* @__PURE__ */ jsx("strong", {
+                    children: item.label
                   })
-                }), /* @__PURE__ */ jsx("td", {
-                  children: row.imageUrl ? /* @__PURE__ */ jsx("img", {
-                    src: row.imageUrl,
-                    alt: "",
-                    loading: "lazy",
-                    width: 72,
-                    height: 72,
-                    style: {
-                      objectFit: "cover",
-                      border: "1px solid rgba(16, 38, 59, 0.12)"
-                    }
-                  }) : /* @__PURE__ */ jsx("small", {
-                    children: "No preview"
-                  })
-                }), /* @__PURE__ */ jsxs("td", {
-                  children: [/* @__PURE__ */ jsx("strong", {
-                    children: row.productTitle
-                  }), /* @__PURE__ */ jsxs("small", {
-                    children: ["Image #", row.position]
-                  })]
-                }), /* @__PURE__ */ jsxs("td", {
-                  children: [/* @__PURE__ */ jsx("textarea", {
-                    rows: 2,
-                    className: "seo-textarea",
-                    value: row.altText,
-                    onChange: (event) => {
-                      const nextAlt = event.target.value;
-                      patchRow(row.id, {
-                        altText: nextAlt,
-                        suggestedAlt: suggestImageAltText({
-                          productTitle: row.productTitle,
-                          position: row.position,
-                          currentAlt: nextAlt
-                        })
-                      });
-                    }
-                  }), /* @__PURE__ */ jsxs("small", {
-                    children: [String(row.altText || "").trim().length, " chars"]
-                  })]
-                }), /* @__PURE__ */ jsxs("td", {
-                  children: [/* @__PURE__ */ jsx("textarea", {
-                    rows: 2,
-                    className: "seo-textarea",
-                    value: row.suggestedAlt,
-                    onChange: (event) => patchRow(row.id, {
-                      suggestedAlt: event.target.value
-                    })
-                  }), /* @__PURE__ */ jsxs("div", {
-                    style: {
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      marginTop: 4,
-                      flexWrap: "wrap",
-                      gap: 4
-                    },
-                    children: [/* @__PURE__ */ jsx("small", {
-                      children: "Used by Fix selected"
-                    }), /* @__PURE__ */ jsx("button", {
-                      type: "button",
-                      className: "seo-button secondary",
-                      style: {
-                        fontSize: 11,
-                        padding: "3px 8px"
-                      },
-                      onClick: () => generateVisionAlt(row),
-                      disabled: aiFetcher.state !== "idle" && aiImageId === row.id,
-                      title: `Analyze this actual image with Gemini Vision (${CREDIT_COSTS.vision_alt} tokens)`,
-                      children: aiFetcher.state !== "idle" && aiImageId === row.id ? "Analyzing..." : `👁️ Gemini Vision (${CREDIT_COSTS.vision_alt} tok)`
-                    })]
-                  }), ((_a3 = aiFetcher.data) == null ? void 0 : _a3.ok) && lastVisionImageId === row.id ? /* @__PURE__ */ jsx("small", {
-                    style: {
-                      color: "var(--seo-primary)",
-                      display: "block",
-                      marginTop: 2
-                    },
-                    children: aiFetcher.data.superAccess ? "★ Super Access (0 tokens deducted)." : aiFetcher.data.creditsDeducted ? `⚡ Deducted ${aiFetcher.data.creditsDeducted} tokens. ${aiFetcher.data.creditsRemaining} remaining.` : "Fallback ALT applied (0 tokens charged)."
-                  }) : null]
-                }), /* @__PURE__ */ jsxs("td", {
-                  children: [/* @__PURE__ */ jsx("span", {
-                    className: `issue-chip ${tone}`,
-                    children: statusLabel(status)
-                  }), status.message ? /* @__PURE__ */ jsx("small", {
-                    children: status.message
-                  }) : null]
+                }), /* @__PURE__ */ jsx("span", {
+                  className: isActive ? "pill pill-good" : "pill pill-info",
+                  style: {
+                    justifySelf: "start",
+                    fontSize: 11
+                  },
+                  children: item.badge
+                }), /* @__PURE__ */ jsx("p", {
+                  children: item.description
                 })]
-              }, `${row.productId}-${row.id}`);
+              }, item.id);
             })
-          })]
-        })
-      }), /* @__PURE__ */ jsxs("div", {
-        className: "toolbar",
-        children: [/* @__PURE__ */ jsx("small", {
-          children: "Showing up to 25 images per page"
-        }), pageData.pagination.previousPageInfo ? /* @__PURE__ */ jsx("button", {
-          className: "seo-button",
-          type: "button",
-          onClick: () => loadList(pageData.query || "", pageData.pagination.previousPageInfo, pageData.statusFilter || "all"),
-          disabled: listFetcher.state !== "idle",
-          children: "Previous page"
-        }) : null, pageData.pagination.nextPageInfo ? /* @__PURE__ */ jsx("button", {
-          className: "seo-button",
-          type: "button",
-          onClick: () => loadList(pageData.query || "", pageData.pagination.nextPageInfo, pageData.statusFilter || "all"),
-          disabled: listFetcher.state !== "idle",
-          children: "Next page"
-        }) : null]
-      }), /* @__PURE__ */ jsxs("div", {
-        className: "section-card",
-        children: [/* @__PURE__ */ jsxs("div", {
-          className: "toolbar",
-          style: {
-            justifyContent: "space-between"
-          },
-          children: [/* @__PURE__ */ jsx("h3", {
+          }), preset === "custom" ? /* @__PURE__ */ jsxs("div", {
+            className: "seo-grid grid-4",
+            children: [/* @__PURE__ */ jsxs("label", {
+              className: "editor-field",
+              children: [/* @__PURE__ */ jsx("span", {
+                children: "Max Width / Height (px)"
+              }), /* @__PURE__ */ jsx("input", {
+                type: "number",
+                min: 400,
+                max: 4096,
+                className: "seo-input",
+                value: customMaxWidth,
+                onChange: (e) => setCustomMaxWidth(Number(e.target.value || 2048))
+              })]
+            }), /* @__PURE__ */ jsxs("label", {
+              className: "editor-field",
+              children: [/* @__PURE__ */ jsx("span", {
+                children: "Quality (45 - 95)"
+              }), /* @__PURE__ */ jsx("input", {
+                type: "number",
+                min: 45,
+                max: 95,
+                className: "seo-input",
+                value: customQuality,
+                onChange: (e) => setCustomQuality(Number(e.target.value || 80))
+              })]
+            }), /* @__PURE__ */ jsxs("label", {
+              className: "editor-field",
+              children: [/* @__PURE__ */ jsx("span", {
+                children: "Output Format Rule"
+              }), /* @__PURE__ */ jsxs("select", {
+                className: "seo-input",
+                value: customFormat,
+                onChange: (e) => setCustomFormat(e.target.value),
+                children: [/* @__PURE__ */ jsx("option", {
+                  value: "smart",
+                  children: "Smart PageSpeed (MozJPEG / WebP)"
+                }), /* @__PURE__ */ jsx("option", {
+                  value: "webp",
+                  children: "Force WebP"
+                }), /* @__PURE__ */ jsx("option", {
+                  value: "jpeg",
+                  children: "Force MozJPEG Progressive"
+                }), /* @__PURE__ */ jsx("option", {
+                  value: "png",
+                  children: "Palette PNG"
+                }), /* @__PURE__ */ jsx("option", {
+                  value: "preserve",
+                  children: "Preserve Original Format"
+                })]
+              })]
+            }), /* @__PURE__ */ jsxs("label", {
+              className: "editor-field",
+              children: [/* @__PURE__ */ jsx("span", {
+                children: "Max File Size Target (KB, 0 = off)"
+              }), /* @__PURE__ */ jsx("input", {
+                type: "number",
+                min: 0,
+                max: 5e3,
+                className: "seo-input",
+                value: customTargetMaxKb,
+                onChange: (e) => setCustomTargetMaxKb(Number(e.target.value || 0))
+              })]
+            })]
+          }) : /* @__PURE__ */ jsxs("div", {
+            className: "status-banner",
+            "data-no-toast": "true",
             style: {
-              margin: 0
+              padding: "8px 12px"
             },
-            children: "Previous Results"
-          }), /* @__PURE__ */ jsx("small", {
-            children: "Stored history from recent check/fix runs"
+            children: [/* @__PURE__ */ jsx("strong", {
+              children: "Active Rule:"
+            }), " Max dimension ", /* @__PURE__ */ jsxs("code", {
+              children: [effectiveOptions.maxWidth, "px"]
+            }), " • Quality", " ", /* @__PURE__ */ jsx("code", {
+              children: effectiveOptions.quality
+            }), " • Format ", /* @__PURE__ */ jsx("code", {
+              children: effectiveOptions.format.toUpperCase()
+            }), effectiveOptions.targetMaxKb > 0 ? /* @__PURE__ */ jsxs(Fragment, {
+              children: [" ", "• Max ceiling ", /* @__PURE__ */ jsxs("code", {
+                children: ["<= ", effectiveOptions.targetMaxKb, " KB"]
+              })]
+            }) : null]
+          }), /* @__PURE__ */ jsxs("div", {
+            className: "toolbar",
+            children: [/* @__PURE__ */ jsx("button", {
+              className: "seo-button secondary",
+              type: "button",
+              onClick: () => setSelectAll(true),
+              children: "Select all on page"
+            }), /* @__PURE__ */ jsx("button", {
+              className: "seo-button secondary",
+              type: "button",
+              onClick: selectIssuesOnly,
+              children: "Select heavy / oversized"
+            }), /* @__PURE__ */ jsx("button", {
+              className: "seo-button secondary",
+              type: "button",
+              onClick: selectCriticalCompressionOnly,
+              children: "Select critical only"
+            }), /* @__PURE__ */ jsx("button", {
+              className: "seo-button secondary",
+              type: "button",
+              onClick: () => setSelectAll(false),
+              children: "Clear"
+            }), /* @__PURE__ */ jsx("button", {
+              className: "seo-button secondary",
+              type: "button",
+              onClick: runCompressionPreview,
+              disabled: actionBusy,
+              children: actionBusy && activeIntent === "previewCompress" ? "Measuring..." : "📊 Estimate Savings (Dry Run)"
+            }), /* @__PURE__ */ jsx("button", {
+              className: "seo-button",
+              type: "button",
+              onClick: runCompressSelected,
+              disabled: actionBusy,
+              title: `Compresses selected heavy images and updates them in Shopify (${CREDIT_COSTS.image_compression} token per compressed image)`,
+              children: actionBusy && activeIntent === "compressImages" ? "Compressing..." : `🗜️ Compress Selected (${CREDIT_COSTS.image_compression} tok/img)`
+            }), /* @__PURE__ */ jsxs("button", {
+              className: "seo-button",
+              type: "button",
+              onClick: runCompressHeavyOnPage,
+              disabled: actionBusy,
+              title: `Compresses all heavy images (>200 KB) on this page (${CREDIT_COSTS.image_compression} token per compressed image)`,
+              children: ["⚡ Compress All Heavy on Page (", CREDIT_COSTS.image_compression, " tok/img)"]
+            })]
           })]
-        }), !history.length ? /* @__PURE__ */ jsx("div", {
+        }), ((_g = actionFetcher.data) == null ? void 0 : _g.intent) === "compressImages" && ((_h = actionFetcher.data) == null ? void 0 : _h.error) ? /* @__PURE__ */ jsxs("div", {
+          className: "status-banner banner-danger",
+          "data-toast-title": "Image Compression Notice",
+          children: [/* @__PURE__ */ jsx("strong", {
+            children: "Compression stopped:"
+          }), " ", actionFetcher.data.error, " ", ((_i = actionFetcher.data) == null ? void 0 : _i.outOfCredits) ? /* @__PURE__ */ jsx(Link, {
+            to: "/app/billing",
+            style: {
+              marginLeft: 8,
+              fontWeight: 700
+            },
+            children: "Top Up Tokens →"
+          }) : null]
+        }) : null, ((_j = actionFetcher.data) == null ? void 0 : _j.intent) === "previewCompress" && ((_k = actionFetcher.data) == null ? void 0 : _k.ok) ? /* @__PURE__ */ jsxs("div", {
+          className: "status-banner",
+          "data-toast": "info",
+          "data-toast-title": "Dry Run Estimate",
+          children: [/* @__PURE__ */ jsxs("strong", {
+            children: ["Estimated PageSpeed Savings (", ((_l = actionFetcher.data.totals) == null ? void 0 : _l.optimizableCount) || 0, " of ", ((_m = actionFetcher.data.totals) == null ? void 0 : _m.checked) || 0, " optimizable):"]
+          }), " ", formatBytes$1((_n = actionFetcher.data.totals) == null ? void 0 : _n.totalOriginalBytes), " →", " ", /* @__PURE__ */ jsx("strong", {
+            children: formatBytes$1((_o = actionFetcher.data.totals) == null ? void 0 : _o.totalCompressedBytes)
+          }), " ", "(saves ", /* @__PURE__ */ jsx("strong", {
+            children: formatBytes$1((_p = actionFetcher.data.totals) == null ? void 0 : _p.totalSavedBytes)
+          }), " /", " ", /* @__PURE__ */ jsxs("strong", {
+            children: ["-", ((_q = actionFetcher.data.totals) == null ? void 0 : _q.totalSavedPercent) || 0, "%"]
+          }), "). Review below and click Compress Selected to push to Shopify."]
+        }) : null, ((_r = actionFetcher.data) == null ? void 0 : _r.intent) === "compressImages" && ((_s = actionFetcher.data) == null ? void 0 : _s.compressedCount) !== void 0 ? /* @__PURE__ */ jsxs("div", {
+          className: actionFetcher.data.ok ? "status-banner banner-good" : "status-banner",
+          "data-toast-title": "Image Compression Complete",
+          children: [/* @__PURE__ */ jsx("strong", {
+            children: "Compression run finished:"
+          }), " ", actionFetcher.data.compressedCount || 0, " compressed (saved", " ", /* @__PURE__ */ jsx("strong", {
+            children: formatBytes$1(actionFetcher.data.totalBytesSaved || 0)
+          }), " /", " ", /* @__PURE__ */ jsxs("strong", {
+            children: ["-", actionFetcher.data.totalSavedPercent || 0, "%"]
+          }), "),", " ", actionFetcher.data.skippedCount || 0, " skipped (already optimal),", " ", actionFetcher.data.failedCount || 0, " failed.", " ", actionFetcher.data.superAccess ? /* @__PURE__ */ jsx("span", {
+            children: "Super Access: 0 tokens charged."
+          }) : /* @__PURE__ */ jsxs("span", {
+            children: ["Tokens used: ", /* @__PURE__ */ jsx("strong", {
+              children: actionFetcher.data.creditsDeducted || 0
+            }), " (", typeof actionFetcher.data.creditsRemaining === "number" ? `${actionFetcher.data.creditsRemaining} remaining` : "balance synced", ")."]
+          }), actionFetcher.data.stoppedReason ? ` ${actionFetcher.data.stoppedReason}` : ""]
+        }) : null, !rows.length ? /* @__PURE__ */ jsx("div", {
           className: "empty-box",
-          children: "No previous Image Optimizer runs yet."
+          children: "No product images matched the current filter."
         }) : /* @__PURE__ */ jsx("div", {
-          className: "table-wrap image-history-table",
+          className: "table-card table-wrap image-optimizer-table",
           children: /* @__PURE__ */ jsxs("table", {
             children: [/* @__PURE__ */ jsx("thead", {
               children: /* @__PURE__ */ jsxs("tr", {
                 children: [/* @__PURE__ */ jsx("th", {
-                  children: "Time"
+                  children: /* @__PURE__ */ jsx("input", {
+                    ref: selectAllRef,
+                    type: "checkbox",
+                    checked: allVisibleSelected,
+                    onChange: (event) => setSelectAll(event.target.checked),
+                    "aria-label": "Select all images on this page"
+                  })
                 }), /* @__PURE__ */ jsx("th", {
-                  children: "Action"
+                  children: "Image"
                 }), /* @__PURE__ */ jsx("th", {
-                  children: "Status"
+                  children: "Product"
                 }), /* @__PURE__ */ jsx("th", {
-                  children: "Needs Fix"
+                  children: "Current Size & Specs"
                 }), /* @__PURE__ */ jsx("th", {
-                  children: "Updated"
+                  children: "Estimated / Optimized Output"
                 }), /* @__PURE__ */ jsx("th", {
-                  children: "Checked"
-                }), /* @__PURE__ */ jsx("th", {
-                  children: "Note"
+                  children: "PageSpeed Health"
                 })]
               })
             }), /* @__PURE__ */ jsx("tbody", {
-              children: history.slice(0, 10).map((entry2) => {
+              children: rows.map((row) => {
                 var _a3, _b2;
+                const health = row.sizeHealth || analyzeImageSizeHealth(row);
+                const tone = compressionTone(health);
+                const preview = compressionPreviews[String(row.id)];
+                const applied = compressionAppliedById[String(row.id)];
                 return /* @__PURE__ */ jsxs("tr", {
+                  children: [/* @__PURE__ */ jsx("td", {
+                    children: /* @__PURE__ */ jsx("input", {
+                      type: "checkbox",
+                      checked: Boolean(selected[row.id]),
+                      onChange: (event) => setSelected((current) => ({
+                        ...current,
+                        [row.id]: event.target.checked
+                      }))
+                    })
+                  }), /* @__PURE__ */ jsx("td", {
+                    children: row.imageUrl ? /* @__PURE__ */ jsx("img", {
+                      src: row.imageUrl,
+                      alt: "",
+                      loading: "lazy",
+                      width: 72,
+                      height: 72,
+                      style: {
+                        objectFit: "cover",
+                        border: "1px solid rgba(16, 38, 59, 0.12)"
+                      }
+                    }) : /* @__PURE__ */ jsx("small", {
+                      children: "No preview"
+                    })
+                  }), /* @__PURE__ */ jsxs("td", {
+                    children: [/* @__PURE__ */ jsx("strong", {
+                      children: row.productTitle
+                    }), /* @__PURE__ */ jsxs("small", {
+                      children: ["Image #", row.position, ((_a3 = row.variantIds) == null ? void 0 : _a3.length) ? ` • ${row.variantIds.length} variant(s)` : ""]
+                    })]
+                  }), /* @__PURE__ */ jsxs("td", {
+                    children: [/* @__PURE__ */ jsxs("div", {
+                      children: [/* @__PURE__ */ jsx("strong", {
+                        children: health.fileSizeLabel
+                      }), " ", /* @__PURE__ */ jsx("span", {
+                        className: "pill",
+                        style: {
+                          fontSize: 11
+                        },
+                        children: String(health.format || "unknown").toUpperCase()
+                      })]
+                    }), /* @__PURE__ */ jsxs("small", {
+                      style: {
+                        display: "block",
+                        marginTop: 4
+                      },
+                      children: ["Dimensions: ", health.dimensionsLabel]
+                    })]
+                  }), /* @__PURE__ */ jsx("td", {
+                    children: applied ? applied.skipped ? /* @__PURE__ */ jsx("small", {
+                      children: applied.reason || "Skipped (already optimal)."
+                    }) : /* @__PURE__ */ jsxs("div", {
+                      children: [/* @__PURE__ */ jsxs("span", {
+                        className: "issue-chip ok",
+                        children: ["✓ Saved ", formatBytes$1(applied.savedBytes), " (-", applied.savedPercent, "%)"]
+                      }), /* @__PURE__ */ jsxs("small", {
+                        style: {
+                          display: "block",
+                          marginTop: 4
+                        },
+                        children: [formatBytes$1(applied.originalBytes), " → ", formatBytes$1(applied.compressedBytes), " •", " ", applied.width, "×", applied.height, " • ", String(applied.format || "").toUpperCase()]
+                      })]
+                    }) : preview ? !preview.ok ? /* @__PURE__ */ jsx("small", {
+                      style: {
+                        color: "#a33636"
+                      },
+                      children: preview.error
+                    }) : preview.skipped ? /* @__PURE__ */ jsx("small", {
+                      children: preview.reason
+                    }) : /* @__PURE__ */ jsxs("div", {
+                      children: [/* @__PURE__ */ jsxs("span", {
+                        className: "issue-chip ok",
+                        children: ["Est. -", formatBytes$1(preview.savedBytes), " (-", preview.savedPercent, "%)"]
+                      }), /* @__PURE__ */ jsxs("small", {
+                        style: {
+                          display: "block",
+                          marginTop: 4
+                        },
+                        children: [formatBytes$1(preview.originalBytes), " → ", formatBytes$1(preview.compressedBytes), " •", " ", preview.width, "×", preview.height, " • ", String(preview.format || "").toUpperCase()]
+                      })]
+                    }) : /* @__PURE__ */ jsx("small", {
+                      style: {
+                        color: "var(--seo-muted)"
+                      },
+                      children: health.needsOptimization ? `Estimated ~${health.estimatedSavablePercent}% smaller with ${effectiveOptions.preset}` : "Click Estimate Savings to inspect exact KB output."
+                    })
+                  }), /* @__PURE__ */ jsxs("td", {
+                    children: [/* @__PURE__ */ jsx("span", {
+                      className: `issue-chip ${tone}`,
+                      children: compressionLabel(health)
+                    }), ((_b2 = health.reasons) == null ? void 0 : _b2.length) ? /* @__PURE__ */ jsx("small", {
+                      style: {
+                        display: "block",
+                        marginTop: 4
+                      },
+                      children: health.reasons[0]
+                    }) : /* @__PURE__ */ jsx("small", {
+                      style: {
+                        display: "block",
+                        marginTop: 4
+                      },
+                      children: "Meets 200 KB & 2048px PageSpeed guidelines."
+                    })]
+                  })]
+                }, `${row.productId}-${row.id}`);
+              })
+            })]
+          })
+        }), /* @__PURE__ */ jsxs("div", {
+          className: "toolbar",
+          children: [/* @__PURE__ */ jsx("small", {
+            children: "Showing up to 25 images per page"
+          }), pageData.pagination.previousPageInfo ? /* @__PURE__ */ jsx("button", {
+            className: "seo-button",
+            type: "button",
+            onClick: () => loadList(pageData.query || "", pageData.pagination.previousPageInfo, pageData.statusFilter || "all", "compression", pageData.compressionFilter || "all"),
+            disabled: listFetcher.state !== "idle",
+            children: "Previous page"
+          }) : null, pageData.pagination.nextPageInfo ? /* @__PURE__ */ jsx("button", {
+            className: "seo-button",
+            type: "button",
+            onClick: () => loadList(pageData.query || "", pageData.pagination.nextPageInfo, pageData.statusFilter || "all", "compression", pageData.compressionFilter || "all"),
+            disabled: listFetcher.state !== "idle",
+            children: "Next page"
+          }) : null]
+        }), /* @__PURE__ */ jsxs("div", {
+          className: "section-card",
+          children: [/* @__PURE__ */ jsxs("div", {
+            className: "toolbar",
+            style: {
+              justifyContent: "space-between"
+            },
+            children: [/* @__PURE__ */ jsx("h3", {
+              style: {
+                margin: 0
+              },
+              children: "Image Compression History"
+            }), /* @__PURE__ */ jsx("small", {
+              children: "Saved Shopify asset optimizations & byte reductions"
+            })]
+          }), !compressionHistory.length ? /* @__PURE__ */ jsx("div", {
+            className: "empty-box",
+            children: "No image compression runs yet."
+          }) : /* @__PURE__ */ jsx("div", {
+            className: "table-wrap image-history-table",
+            children: /* @__PURE__ */ jsxs("table", {
+              children: [/* @__PURE__ */ jsx("thead", {
+                children: /* @__PURE__ */ jsxs("tr", {
+                  children: [/* @__PURE__ */ jsx("th", {
+                    children: "Time"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Preset"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Status"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Compressed"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Skipped / Failed"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Bytes Saved"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Note"
+                  })]
+                })
+              }), /* @__PURE__ */ jsx("tbody", {
+                children: compressionHistory.slice(0, 10).map((entry2) => /* @__PURE__ */ jsxs("tr", {
                   children: [/* @__PURE__ */ jsx("td", {
                     children: formatDate(entry2.createdAt)
                   }), /* @__PURE__ */ jsx("td", {
-                    children: entry2.action === "fix" ? "Fix ALT" : "Check ALT"
+                    children: entry2.preset
                   }), /* @__PURE__ */ jsx("td", {
                     children: /* @__PURE__ */ jsx("span", {
                       className: `issue-chip ${entry2.status === "failed" ? "critical" : "ok"}`,
                       children: entry2.status === "failed" ? "Failed" : "Success"
                     })
                   }), /* @__PURE__ */ jsx("td", {
-                    children: ((_a3 = entry2.summary) == null ? void 0 : _a3.needsFix) || 0
+                    children: entry2.compressed || 0
+                  }), /* @__PURE__ */ jsxs("td", {
+                    children: [entry2.skipped || 0, " / ", entry2.failed || 0]
                   }), /* @__PURE__ */ jsx("td", {
-                    children: entry2.updated || 0
-                  }), /* @__PURE__ */ jsx("td", {
-                    children: ((_b2 = entry2.summary) == null ? void 0 : _b2.total) || entry2.attempted || 0
+                    children: formatBytes$1(entry2.bytesSaved || 0)
                   }), /* @__PURE__ */ jsx("td", {
                     children: entry2.note || "-"
                   })]
-                }, entry2.id);
+                }, entry2.id))
+              })]
+            })
+          })]
+        })]
+      }) : /* @__PURE__ */ jsxs(Fragment, {
+        children: [/* @__PURE__ */ jsxs("div", {
+          className: "seo-grid grid-3",
+          children: [/* @__PURE__ */ jsxs("div", {
+            className: "metric-card",
+            children: [/* @__PURE__ */ jsx("p", {
+              className: "metric-label",
+              children: "Live Status"
+            }), /* @__PURE__ */ jsx("h3", {
+              children: liveStatus
+            }), /* @__PURE__ */ jsx("small", {
+              className: `issue-chip ${liveStatusTone}`,
+              children: actionBusy ? "Running" : "Ready"
+            }), /* @__PURE__ */ jsxs("p", {
+              className: "metric-help",
+              children: ["Last run: ", formatDate(lastRun == null ? void 0 : lastRun.createdAt)]
+            })]
+          }), /* @__PURE__ */ jsxs("div", {
+            className: "metric-card",
+            children: [/* @__PURE__ */ jsx("p", {
+              className: "metric-label",
+              children: "Current Results"
+            }), /* @__PURE__ */ jsxs("h3", {
+              children: [summary.needsFix || 0, " Need Fixes"]
+            }), /* @__PURE__ */ jsxs("p", {
+              className: "metric-help",
+              children: [summary.ideal || 0, " healthy out of ", summary.total || 0, " checked rows"]
+            })]
+          }), /* @__PURE__ */ jsxs("div", {
+            className: "metric-card",
+            children: [/* @__PURE__ */ jsx("p", {
+              className: "metric-label",
+              children: "Selection"
+            }), /* @__PURE__ */ jsxs("h3", {
+              children: [selectedCount, " Selected"]
+            }), /* @__PURE__ */ jsx("p", {
+              className: "metric-help",
+              children: "Use Select all or Select issues for bulk updates."
+            })]
+          })]
+        }), /* @__PURE__ */ jsxs("div", {
+          className: "section-card",
+          children: [/* @__PURE__ */ jsxs("div", {
+            className: "toolbar",
+            style: {
+              justifyContent: "space-between"
+            },
+            children: [/* @__PURE__ */ jsx("h3", {
+              style: {
+                margin: 0
+              },
+              children: "Result Chart"
+            }), /* @__PURE__ */ jsxs("small", {
+              children: [summary.total || 0, " row(s) in current view"]
+            })]
+          }), /* @__PURE__ */ jsx("div", {
+            className: "image-results-track",
+            children: resultSegments.map((segment) => /* @__PURE__ */ jsx("div", {
+              className: "image-results-segment",
+              style: {
+                width: `${segment.percent}%`,
+                background: segment.color
+              },
+              title: `${segment.label}: ${segment.value}`
+            }, segment.key))
+          }), /* @__PURE__ */ jsx("div", {
+            className: "image-results-grid",
+            children: resultSegments.map((segment) => /* @__PURE__ */ jsxs("small", {
+              children: [/* @__PURE__ */ jsxs("strong", {
+                children: [segment.label, ":"]
+              }), " ", segment.value, " (", segment.percent, "%)"]
+            }, `legend-${segment.key}`))
+          })]
+        }), /* @__PURE__ */ jsxs("div", {
+          className: "section-card",
+          children: [/* @__PURE__ */ jsxs("div", {
+            className: "toolbar",
+            style: {
+              justifyContent: "space-between"
+            },
+            children: [/* @__PURE__ */ jsx("h3", {
+              style: {
+                margin: 0
+              },
+              children: "Update All ALT At Once"
+            }), /* @__PURE__ */ jsxs("small", {
+              children: ["Tokens: ", "{title}", ", ", "{position}", ", ", "{handle}"]
+            })]
+          }), /* @__PURE__ */ jsxs("label", {
+            className: "editor-field",
+            children: [/* @__PURE__ */ jsx("span", {
+              children: "Bulk ALT pattern"
+            }), /* @__PURE__ */ jsx("input", {
+              className: "seo-input",
+              value: bulkPattern,
+              onChange: (event) => setBulkPattern(event.target.value),
+              placeholder: "{title} - product image view {position}"
+            })]
+          }), /* @__PURE__ */ jsxs("div", {
+            className: "toolbar",
+            children: [/* @__PURE__ */ jsx("button", {
+              className: "seo-button secondary",
+              type: "button",
+              onClick: applyPatternToAllSuggestions,
+              children: "Apply pattern to all suggestions"
+            }), /* @__PURE__ */ jsx("button", {
+              className: "seo-button secondary",
+              type: "button",
+              onClick: () => setSelectAll(true),
+              children: "Select all on page"
+            }), /* @__PURE__ */ jsx("button", {
+              className: "seo-button secondary",
+              type: "button",
+              onClick: () => setSelectAll(false),
+              children: "Clear selection"
+            }), /* @__PURE__ */ jsx("button", {
+              className: "seo-button secondary",
+              type: "button",
+              onClick: selectIssuesOnly,
+              children: "Select issues"
+            }), /* @__PURE__ */ jsx("button", {
+              className: "seo-button secondary",
+              type: "button",
+              onClick: submitCheck,
+              children: "Check image ALT"
+            }), /* @__PURE__ */ jsx("button", {
+              className: "seo-button",
+              type: "button",
+              onClick: applySelectedFixes,
+              children: "Fix selected ALT"
+            }), /* @__PURE__ */ jsx("button", {
+              className: "seo-button",
+              type: "button",
+              onClick: applyAllVisibleFixes,
+              children: "Update all visible ALT"
+            })]
+          })]
+        }), ((_t = actionFetcher.data) == null ? void 0 : _t.ok) && ((_u = actionFetcher.data) == null ? void 0 : _u.intent) === "checkAlt" ? /* @__PURE__ */ jsxs("div", {
+          className: "status-banner",
+          "data-toast": "info",
+          "data-toast-title": "Image ALT Audit",
+          children: [/* @__PURE__ */ jsx("strong", {
+            children: "Check complete:"
+          }), " ", ((_v = actionFetcher.data.summary) == null ? void 0 : _v.needsFix) || 0, " need fixes, ", ((_w = actionFetcher.data.summary) == null ? void 0 : _w.ideal) || 0, " are healthy,", " ", ((_x = actionFetcher.data.summary) == null ? void 0 : _x.missing) || 0, " missing ALT."]
+        }) : null, ((_y = actionFetcher.data) == null ? void 0 : _y.ok) && ((_z = actionFetcher.data) == null ? void 0 : _z.intent) === "fixAlt" ? /* @__PURE__ */ jsxs("div", {
+          className: "status-banner banner-good",
+          "data-toast-title": "Image ALT Updated",
+          children: ["Updated ALT text for ", actionFetcher.data.updated || 0, " image", actionFetcher.data.updated === 1 ? "" : "s", "."]
+        }) : null, !rows.length ? /* @__PURE__ */ jsx("div", {
+          className: "empty-box",
+          children: "No product images were found in the current filter."
+        }) : /* @__PURE__ */ jsx("div", {
+          className: "table-card table-wrap image-optimizer-table",
+          children: /* @__PURE__ */ jsxs("table", {
+            children: [/* @__PURE__ */ jsx("thead", {
+              children: /* @__PURE__ */ jsxs("tr", {
+                children: [/* @__PURE__ */ jsx("th", {
+                  children: /* @__PURE__ */ jsx("input", {
+                    ref: selectAllRef,
+                    type: "checkbox",
+                    checked: allVisibleSelected,
+                    onChange: (event) => setSelectAll(event.target.checked),
+                    "aria-label": "Select all images on this page"
+                  })
+                }), /* @__PURE__ */ jsx("th", {
+                  children: "Image"
+                }), /* @__PURE__ */ jsx("th", {
+                  children: "Product"
+                }), /* @__PURE__ */ jsx("th", {
+                  children: "Current ALT"
+                }), /* @__PURE__ */ jsx("th", {
+                  children: "Suggested ALT"
+                }), /* @__PURE__ */ jsx("th", {
+                  children: "Status"
+                })]
+              })
+            }), /* @__PURE__ */ jsx("tbody", {
+              children: rows.map((row) => {
+                var _a3;
+                const status = checkedStatusById[row.id] || validateImageAlt(row.altText);
+                const tone = statusTone(status);
+                return /* @__PURE__ */ jsxs("tr", {
+                  children: [/* @__PURE__ */ jsx("td", {
+                    children: /* @__PURE__ */ jsx("input", {
+                      type: "checkbox",
+                      checked: Boolean(selected[row.id]),
+                      onChange: (event) => setSelected((current) => ({
+                        ...current,
+                        [row.id]: event.target.checked
+                      }))
+                    })
+                  }), /* @__PURE__ */ jsx("td", {
+                    children: row.imageUrl ? /* @__PURE__ */ jsx("img", {
+                      src: row.imageUrl,
+                      alt: "",
+                      loading: "lazy",
+                      width: 72,
+                      height: 72,
+                      style: {
+                        objectFit: "cover",
+                        border: "1px solid rgba(16, 38, 59, 0.12)"
+                      }
+                    }) : /* @__PURE__ */ jsx("small", {
+                      children: "No preview"
+                    })
+                  }), /* @__PURE__ */ jsxs("td", {
+                    children: [/* @__PURE__ */ jsx("strong", {
+                      children: row.productTitle
+                    }), /* @__PURE__ */ jsxs("small", {
+                      children: ["Image #", row.position]
+                    })]
+                  }), /* @__PURE__ */ jsxs("td", {
+                    children: [/* @__PURE__ */ jsx("textarea", {
+                      rows: 2,
+                      className: "seo-textarea",
+                      value: row.altText,
+                      onChange: (event) => {
+                        const nextAlt = event.target.value;
+                        patchRow(row.id, {
+                          altText: nextAlt,
+                          suggestedAlt: suggestImageAltText({
+                            productTitle: row.productTitle,
+                            position: row.position,
+                            currentAlt: nextAlt
+                          })
+                        });
+                      }
+                    }), /* @__PURE__ */ jsxs("small", {
+                      children: [String(row.altText || "").trim().length, " chars"]
+                    })]
+                  }), /* @__PURE__ */ jsxs("td", {
+                    children: [/* @__PURE__ */ jsx("textarea", {
+                      rows: 2,
+                      className: "seo-textarea",
+                      value: row.suggestedAlt,
+                      onChange: (event) => patchRow(row.id, {
+                        suggestedAlt: event.target.value
+                      })
+                    }), /* @__PURE__ */ jsxs("div", {
+                      style: {
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginTop: 4,
+                        flexWrap: "wrap",
+                        gap: 4
+                      },
+                      children: [/* @__PURE__ */ jsx("small", {
+                        children: "Used by Fix selected"
+                      }), /* @__PURE__ */ jsx("button", {
+                        type: "button",
+                        className: "seo-button secondary",
+                        style: {
+                          fontSize: 11,
+                          padding: "3px 8px"
+                        },
+                        onClick: () => generateVisionAlt(row),
+                        disabled: aiFetcher.state !== "idle" && aiImageId === row.id,
+                        title: `Analyze this actual image with Gemini Vision (${CREDIT_COSTS.vision_alt} tokens)`,
+                        children: aiFetcher.state !== "idle" && aiImageId === row.id ? "Analyzing..." : `👁️ Gemini Vision (${CREDIT_COSTS.vision_alt} tok)`
+                      })]
+                    }), ((_a3 = aiFetcher.data) == null ? void 0 : _a3.ok) && lastVisionImageId === row.id ? /* @__PURE__ */ jsx("small", {
+                      style: {
+                        color: "var(--seo-primary)",
+                        display: "block",
+                        marginTop: 2
+                      },
+                      children: aiFetcher.data.superAccess ? "★ Super Access (0 tokens deducted)." : aiFetcher.data.creditsDeducted ? `⚡ Deducted ${aiFetcher.data.creditsDeducted} tokens. ${aiFetcher.data.creditsRemaining} remaining.` : "Fallback ALT applied (0 tokens charged)."
+                    }) : null]
+                  }), /* @__PURE__ */ jsxs("td", {
+                    children: [/* @__PURE__ */ jsx("span", {
+                      className: `issue-chip ${tone}`,
+                      children: statusLabel(status)
+                    }), status.message ? /* @__PURE__ */ jsx("small", {
+                      children: status.message
+                    }) : null]
+                  })]
+                }, `${row.productId}-${row.id}`);
               })
             })]
           })
+        }), /* @__PURE__ */ jsxs("div", {
+          className: "toolbar",
+          children: [/* @__PURE__ */ jsx("small", {
+            children: "Showing up to 25 images per page"
+          }), pageData.pagination.previousPageInfo ? /* @__PURE__ */ jsx("button", {
+            className: "seo-button",
+            type: "button",
+            onClick: () => loadList(pageData.query || "", pageData.pagination.previousPageInfo, pageData.statusFilter || "all", "alt", "all"),
+            disabled: listFetcher.state !== "idle",
+            children: "Previous page"
+          }) : null, pageData.pagination.nextPageInfo ? /* @__PURE__ */ jsx("button", {
+            className: "seo-button",
+            type: "button",
+            onClick: () => loadList(pageData.query || "", pageData.pagination.nextPageInfo, pageData.statusFilter || "all", "alt", "all"),
+            disabled: listFetcher.state !== "idle",
+            children: "Next page"
+          }) : null]
+        }), /* @__PURE__ */ jsxs("div", {
+          className: "section-card",
+          children: [/* @__PURE__ */ jsxs("div", {
+            className: "toolbar",
+            style: {
+              justifyContent: "space-between"
+            },
+            children: [/* @__PURE__ */ jsx("h3", {
+              style: {
+                margin: 0
+              },
+              children: "Previous Results"
+            }), /* @__PURE__ */ jsx("small", {
+              children: "Stored history from recent check/fix runs"
+            })]
+          }), !history.length ? /* @__PURE__ */ jsx("div", {
+            className: "empty-box",
+            children: "No previous Image Optimizer runs yet."
+          }) : /* @__PURE__ */ jsx("div", {
+            className: "table-wrap image-history-table",
+            children: /* @__PURE__ */ jsxs("table", {
+              children: [/* @__PURE__ */ jsx("thead", {
+                children: /* @__PURE__ */ jsxs("tr", {
+                  children: [/* @__PURE__ */ jsx("th", {
+                    children: "Time"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Action"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Status"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Needs Fix"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Updated"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Checked"
+                  }), /* @__PURE__ */ jsx("th", {
+                    children: "Note"
+                  })]
+                })
+              }), /* @__PURE__ */ jsx("tbody", {
+                children: history.slice(0, 10).map((entry2) => {
+                  var _a3, _b2;
+                  return /* @__PURE__ */ jsxs("tr", {
+                    children: [/* @__PURE__ */ jsx("td", {
+                      children: formatDate(entry2.createdAt)
+                    }), /* @__PURE__ */ jsx("td", {
+                      children: entry2.action === "fix" ? "Fix ALT" : "Check ALT"
+                    }), /* @__PURE__ */ jsx("td", {
+                      children: /* @__PURE__ */ jsx("span", {
+                        className: `issue-chip ${entry2.status === "failed" ? "critical" : "ok"}`,
+                        children: entry2.status === "failed" ? "Failed" : "Success"
+                      })
+                    }), /* @__PURE__ */ jsx("td", {
+                      children: ((_a3 = entry2.summary) == null ? void 0 : _a3.needsFix) || 0
+                    }), /* @__PURE__ */ jsx("td", {
+                      children: entry2.updated || 0
+                    }), /* @__PURE__ */ jsx("td", {
+                      children: ((_b2 = entry2.summary) == null ? void 0 : _b2.total) || entry2.attempted || 0
+                    }), /* @__PURE__ */ jsx("td", {
+                      children: entry2.note || "-"
+                    })]
+                  }, entry2.id);
+                })
+              })]
+            })
+          })]
         })]
       })]
     })]
@@ -10179,15 +16743,15 @@ const route18 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   __proto__: null,
   action: action$a,
   default: app_imageOptimizer,
-  links: links$a,
-  loader: loader$c,
+  links: links$b,
+  loader: loader$d,
   shouldRevalidate: shouldRevalidate$1
 }, Symbol.toStringTag, { value: "Module" }));
-const links$9 = () => [{
+const links$a = () => [{
   rel: "stylesheet",
   href: seoStyles
 }];
-const loader$b = async ({
+const loader$c = async ({
   request
 }) => {
   const {
@@ -10447,8 +17011,8 @@ const app_bulkMeta = UNSAFE_withComponentProps(function BulkMetaRoute() {
                     type: "button",
                     onClick: () => runAiFix(row),
                     disabled: aiFetcher.state !== "idle" && aiRowId === row.id,
-                    title: "Generate click-worthy meta title & description (1 token)",
-                    children: aiFetcher.state !== "idle" && aiRowId === row.id ? "Generating..." : "⚡ AI Fix (1 tok)"
+                    title: `Generate click-worthy meta title & description (${CREDIT_COSTS.meta_fix} tokens)`,
+                    children: aiFetcher.state !== "idle" && aiRowId === row.id ? "Generating..." : `⚡ AI Fix (${CREDIT_COSTS.meta_fix} tok)`
                   }), ((_a3 = aiFetcher.data) == null ? void 0 : _a3.ok) && lastAiAppliedRowId === row.id ? /* @__PURE__ */ jsxs("small", {
                     style: {
                       display: "block",
@@ -10470,502 +17034,10 @@ const route19 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   __proto__: null,
   action: action$9,
   default: app_bulkMeta,
-  links: links$9,
-  loader: loader$b
+  links: links$a,
+  loader: loader$c
 }, Symbol.toStringTag, { value: "Module" }));
-const PAGESPEED_ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed";
-const AUDIT_GUIDANCE = Object.freeze({
-  "largest-contentful-paint-element": {
-    metricTarget: "LCP",
-    fixMode: "THEME_MANUAL",
-    inAppTarget: "",
-    fileHint: "sections/main-product.liquid or layout/theme.liquid",
-    title: "Preload & prioritize LCP hero image",
-    steps: 'Add fetchpriority="high" on your primary above-the-fold hero/product image and remove loading="lazy" from the first visible image.',
-    snippet: `<link rel="preload" as="image" href="{{ product.featured_image | image_url: width: 1200 }}" fetchpriority="high">
-{{ product.featured_image | image_url: width: 1200 | image_tag: fetchpriority: 'high', loading: 'eager', widths: '400, 800, 1200' }}`
-  },
-  "render-blocking-resources": {
-    metricTarget: "FCP / LCP",
-    fixMode: "THEME_MANUAL",
-    inAppTarget: "",
-    fileHint: "layout/theme.liquid",
-    title: "Defer non-critical CSS and render-blocking scripts",
-    steps: "Move non-essential scripts to defer or async, and inline tiny critical above-the-fold styles in layout/theme.liquid.",
-    snippet: `<!-- Non-blocking script & stylesheet loading in layout/theme.liquid -->
-<script src="{{ 'theme.js' | asset_url }}" defer><\/script>
-<link rel="stylesheet" href="{{ 'custom-extra.css' | asset_url }}" media="print" onload="this.media='all'">`
-  },
-  "unused-javascript": {
-    metricTarget: "INP / TBT",
-    fixMode: "APP_BLOAT",
-    inAppTarget: "",
-    fileHint: "Online Store → Themes → Customize → App embeds",
-    title: "Trim heavy or unused third-party app JavaScript",
-    steps: "Disable unused Shopify App Embeds in Theme Customizer and uninstall leftover app script tags injected into theme.liquid.",
-    snippet: `{%- comment -%} Load heavy widgets only on pages that need them {%- endcomment -%}
-{% if template.name == 'product' %}
-  {{ 'product-widget.js' | asset_url | script_tag }}
-{% endif %}`
-  },
-  "bootup-time": {
-    metricTarget: "INP / TBT",
-    fixMode: "APP_BLOAT",
-    inAppTarget: "",
-    fileHint: "Online Store → Themes → Customize → App embeds",
-    title: "Reduce JavaScript execution & main-thread blocking",
-    steps: "Audit the heavy script URLs below. Disable redundant chat widgets, popups, or duplicate tracking pixels firing on initial page load.",
-    snippet: `<!-- Delay non-essential analytics/widgets until user interaction -->
-<script>
-  window.addEventListener('pointerdown', function loadDeferred() {
-    // initialize non-critical widget here
-  }, { once: true, passive: true });
-<\/script>`
-  },
-  "third-party-summary": {
-    metricTarget: "INP / LCP",
-    fixMode: "APP_BLOAT",
-    inAppTarget: "",
-    fileHint: "Shopify Admin → Settings → Customer events / Theme App Embeds",
-    title: "Consolidate heavy third-party Shopify scripts",
-    steps: "Review third-party script execution costs below. Consolidate pixels into Shopify Web Pixels and disable unused theme app embeds.",
-    snippet: ""
-  },
-  "uses-optimized-images": {
-    metricTarget: "LCP",
-    fixMode: "IN_APP_AUTO",
-    inAppTarget: "/app/image-optimizer",
-    fileHint: "Image Optimizer + Shopify Liquid image_url filter",
-    title: "Compress oversized images & use modern width/format",
-    steps: "Ensure Liquid templates render responsive Shopify CDN sizes via image_url + image_tag and audit product media ALT & assets in Image Optimizer.",
-    snippet: `{{ image | image_url: width: 1000 | image_tag: widths: '360, 540, 720, 1000', sizes: '(min-width: 990px) 50vw, 100vw', loading: 'lazy' }}`
-  },
-  "modern-image-formats": {
-    metricTarget: "LCP",
-    fixMode: "THEME_MANUAL",
-    inAppTarget: "/app/image-optimizer",
-    fileHint: "Sections / Snippets using img tags",
-    title: "Serve WebP/AVIF via Shopify CDN image_url filters",
-    steps: "Replace hardcoded static image URLs or deprecated img_url with Shopify's modern image_url filter, which negotiates WebP/AVIF automatically.",
-    snippet: `{{ product.featured_image | image_url: width: 900 | image_tag: loading: 'eager', decoding: 'async' }}`
-  },
-  "uses-responsive-images": {
-    metricTarget: "LCP",
-    fixMode: "THEME_MANUAL",
-    inAppTarget: "/app/image-optimizer",
-    fileHint: "Sections / Snippets rendering product cards",
-    title: "Deliver properly sized srcset images for mobile viewports",
-    steps: "Add responsive widths and sizes attributes so mobile browsers do not download desktop 2000px+ thumbnails.",
-    snippet: `{{ card_product.featured_media | image_url: width: 720 | image_tag: widths: '240, 360, 540, 720', sizes: '(max-width: 749px) 50vw, 25vw', loading: 'lazy' }}`
-  },
-  "offscreen-images": {
-    metricTarget: "LCP / Bandwidth",
-    fixMode: "THEME_MANUAL",
-    inAppTarget: "",
-    fileHint: "Collection grid / footer snippets",
-    title: "Lazy-load below-the-fold product cards and footer media",
-    steps: 'Add loading="lazy" on collection grid images below row 1, related products, and footer badges.',
-    snippet: `{{ block.settings.image | image_url: width: 800 | image_tag: loading: 'lazy', decoding: 'async' }}`
-  },
-  "unsized-images": {
-    metricTarget: "CLS",
-    fixMode: "THEME_MANUAL",
-    inAppTarget: "",
-    fileHint: "Theme CSS / Product card & banner templates",
-    title: "Reserve explicit width & height to stop layout shifts (CLS)",
-    steps: "Ensure every <img> specifies explicit width and height HTML attributes (Shopify's image_tag adds them automatically) or CSS aspect-ratio.",
-    snippet: `<img src="{{ img | image_url: width: 800 }}" width="{{ img.width }}" height="{{ img.height }}" alt="{{ img.alt | escape }}" style="height:auto;">`
-  },
-  "layout-shift-elements": {
-    metricTarget: "CLS",
-    fixMode: "THEME_MANUAL",
-    inAppTarget: "",
-    fileHint: "Announcement bar / sticky app banners",
-    title: "Stabilize dynamic announcement bars, reviews, and media heights",
-    steps: "Set a fixed min-height on review star badges, announcement banners, and variant swatches so content below does not jump after hydration.",
-    snippet: `.product-reviews-badge, .announcement-slot {
-  min-height: 28px;
-}`
-  },
-  "font-display": {
-    metricTarget: "FCP / CLS",
-    fixMode: "THEME_MANUAL",
-    inAppTarget: "",
-    fileHint: "layout/theme.liquid / assets/*.css",
-    title: "Prevent invisible text flash with font-display: swap",
-    steps: "Add &display=swap to external font imports and font-display: swap inside @font-face declarations.",
-    snippet: `@font-face {
-  font-family: 'CustomBrandFont';
-  font-display: swap;
-}`
-  },
-  "meta-description": {
-    metricTarget: "SEO",
-    fixMode: "IN_APP_AUTO",
-    inAppTarget: "/app/bulk-meta",
-    fileHint: "Bulk Meta Editor / Product SEO",
-    title: "Add compelling meta description for higher Google CTR",
-    steps: "Fix the missing meta description directly using the Manual/AI editor below or across your entire catalog in Bulk Meta.",
-    snippet: ""
-  },
-  "document-title": {
-    metricTarget: "SEO",
-    fixMode: "IN_APP_AUTO",
-    inAppTarget: "/app/products",
-    fileHint: "Product SEO Editor / Online Store Preferences",
-    title: "Ensure page has a unique, keyword-rich <title> tag",
-    steps: "Set a clear 50-60 character SEO title in Shopify Preferences (for homepage) or Product SEO Editor (for products).",
-    snippet: ""
-  },
-  "image-alt": {
-    metricTarget: "SEO / Accessibility",
-    fixMode: "IN_APP_AUTO",
-    inAppTarget: "/app/image-optimizer?status=needs-fix",
-    fileHint: "Image Optimizer & Gemini Vision ALT",
-    title: "Fix missing product and theme image ALT text",
-    steps: "Open Image Optimizer to auto-generate descriptive WCAG/SEO ALT tags using Gemini Vision AI or manual bulk edit.",
-    snippet: ""
-  },
-  "robots-txt": {
-    metricTarget: "SEO Crawl",
-    fixMode: "IN_APP_AUTO",
-    inAppTarget: "/app/robots",
-    fileHint: "Technical & History → Robots.txt",
-    title: "Fix invalid or blocking robots.txt rules",
-    steps: "Validate and clean your Shopify templates/robots.txt.liquid directives inside the Robots.txt manager.",
-    snippet: ""
-  },
-  "is-crawlable": {
-    metricTarget: "SEO Crawl",
-    fixMode: "IN_APP_AUTO",
-    inAppTarget: "/app/robots",
-    fileHint: "Robots.txt / Theme meta robots",
-    title: "Ensure public storefront pages are indexable (remove accidental noindex)",
-    steps: "Check theme.liquid for unintended noindex meta tags and verify Password Protection is turned off for live stores.",
-    snippet: ""
-  }
-});
-function isPrivateOrLocalHostname(hostname) {
-  const host = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
-  if (!host) return true;
-  if (host === "localhost" || host === "0.0.0.0" || host === "::1" || host.endsWith(".local") || host.endsWith(".internal")) {
-    return true;
-  }
-  const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4Match) {
-    const [, a, b] = ipv4Match.map(Number);
-    if (a === 10 || a === 127 || a === 0) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-  }
-  return false;
-}
-function normalizePageSpeedTargetUrl(shop, inputUrl = "") {
-  const cleanShop = String(shop || "").trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
-  const fallbackBase = cleanShop ? `https://${cleanShop}` : "";
-  const raw = String(inputUrl || "").trim();
-  if (!raw) {
-    if (!fallbackBase) throw new Error("Store domain or target URL is required.");
-    return new URL(fallbackBase).toString();
-  }
-  let candidate = raw;
-  if (raw.startsWith("/")) {
-    if (!fallbackBase) throw new Error("Store domain is required for relative storefront paths.");
-    candidate = `${fallbackBase}${raw}`;
-  } else if (!/^https?:\/\//i.test(raw)) {
-    candidate = `https://${raw}`;
-  }
-  let parsed;
-  try {
-    parsed = new URL(candidate);
-  } catch {
-    throw new Error("Enter a valid public URL or storefront path (e.g. /products/example).");
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error("Only HTTP/HTTPS URLs can be tested with Google PageSpeed Insights.");
-  }
-  if (isPrivateOrLocalHostname(parsed.hostname) || !parsed.hostname.includes(".")) {
-    throw new Error("Google PageSpeed Insights can only test public internet URLs.");
-  }
-  parsed.hash = "";
-  return parsed.toString();
-}
-function extractProductHandleFromUrl(targetUrl) {
-  try {
-    const parsed = new URL(String(targetUrl || "").trim());
-    const match = parsed.pathname.match(/\/products\/([^/?#]+)/i);
-    return match ? decodeURIComponent(match[1]).toLowerCase() : "";
-  } catch {
-    return "";
-  }
-}
-function roundScore(categoryScore) {
-  if (typeof categoryScore !== "number" || !Number.isFinite(categoryScore)) return null;
-  return Math.max(0, Math.min(100, Math.round(categoryScore * 100)));
-}
-function rateMetric(value, goodMax, poorMin) {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "unknown";
-  if (value <= goodMax) return "good";
-  if (value <= poorMin) return "needs-improvement";
-  return "poor";
-}
-function formatMs(ms) {
-  if (typeof ms !== "number" || !Number.isFinite(ms)) return "N/A";
-  if (ms >= 1e3) return `${(ms / 1e3).toFixed(2)} s`;
-  return `${Math.round(ms)} ms`;
-}
-function formatBytes(bytes) {
-  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) return "";
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  return `${Math.round(bytes / 1024)} KB`;
-}
-function mapAuditItems(audit) {
-  const details = audit == null ? void 0 : audit.details;
-  const rows = Array.isArray(details == null ? void 0 : details.items) ? details.items : [];
-  return rows.slice(0, 5).map((item) => {
-    var _a2, _b, _c;
-    const url = String(
-      (item == null ? void 0 : item.url) || (item == null ? void 0 : item.entity) || ((_a2 = item == null ? void 0 : item.node) == null ? void 0 : _a2.snippet) || ((_b = item == null ? void 0 : item.source) == null ? void 0 : _b.url) || ""
-    ).trim();
-    const label2 = String(((_c = item == null ? void 0 : item.node) == null ? void 0 : _c.nodeLabel) || (item == null ? void 0 : item.entity) || "").trim();
-    const wastedMs = typeof (item == null ? void 0 : item.wastedMs) === "number" ? Math.round(item.wastedMs) : null;
-    const blockingTime = typeof (item == null ? void 0 : item.blockingTime) === "number" ? Math.round(item.blockingTime) : null;
-    const wastedBytes = typeof (item == null ? void 0 : item.wastedBytes) === "number" ? Math.round(item.wastedBytes) : typeof (item == null ? void 0 : item.totalBytes) === "number" ? Math.round(item.totalBytes) : null;
-    return {
-      url: url.slice(0, 240),
-      label: label2.slice(0, 140),
-      wastedMs: wastedMs ?? blockingTime,
-      wastedBytes
-    };
-  });
-}
-function normalizeDescription(text2) {
-  return String(text2 || "").replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, "$1").replace(/\s+/g, " ").trim();
-}
-function buildManualPageSpeedChecklist(report) {
-  var _a2, _b;
-  const failingIds = new Set(
-    [...(report == null ? void 0 : report.opportunities) || [], ...(report == null ? void 0 : report.seoFindings) || []].filter((item) => item && item.id).map((item) => item.id)
-  );
-  const items = [];
-  for (const audit of [...(report == null ? void 0 : report.opportunities) || [], ...(report == null ? void 0 : report.seoFindings) || []]) {
-    if (!(audit == null ? void 0 : audit.id)) continue;
-    const guide = AUDIT_GUIDANCE[audit.id];
-    items.push({
-      id: `manual_${audit.id}`,
-      auditId: audit.id,
-      title: (guide == null ? void 0 : guide.title) || audit.title,
-      metricTarget: (guide == null ? void 0 : guide.metricTarget) || audit.category || "SEO",
-      fixMode: (guide == null ? void 0 : guide.fixMode) || "THEME_MANUAL",
-      inAppTarget: (guide == null ? void 0 : guide.inAppTarget) || "",
-      fileHint: (guide == null ? void 0 : guide.fileHint) || "Online Store → Themes → Edit code",
-      displayImpact: audit.displayValue || (audit.savingsMs ? `${Math.round(audit.savingsMs)} ms savings` : "Needs fix"),
-      steps: (guide == null ? void 0 : guide.steps) || audit.description,
-      snippet: (guide == null ? void 0 : guide.snippet) || "",
-      offendingItems: Array.isArray(audit.items) ? audit.items : []
-    });
-  }
-  if (!failingIds.has("meta-description") && (((_a2 = report == null ? void 0 : report.scores) == null ? void 0 : _a2.seo) ?? 100) < 100) {
-    items.push({
-      id: "manual_seo_review",
-      auditId: "seo-review",
-      title: "Verify Store & Product Meta Snippets",
-      metricTarget: "SEO",
-      fixMode: "IN_APP_AUTO",
-      inAppTarget: "/app/bulk-meta",
-      fileHint: "Bulk Meta Editor / Product SEO",
-      displayImpact: `SEO Score ${((_b = report == null ? void 0 : report.scores) == null ? void 0 : _b.seo) ?? 0}/100`,
-      steps: "Inspect failing SEO audits and update missing titles, meta descriptions, or ALT text in-app.",
-      snippet: "",
-      offendingItems: []
-    });
-  }
-  return items;
-}
-function parsePageSpeedApiResponse(rawJson, requestedUrl = "", requestedStrategy = "mobile") {
-  var _a2, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C, _D, _E, _F, _G, _H, _I, _J, _K, _L, _M, _N;
-  const lhr = rawJson == null ? void 0 : rawJson.lighthouseResult;
-  if (!lhr || typeof lhr !== "object") {
-    throw new Error("Google PageSpeed Insights returned an incomplete Lighthouse payload.");
-  }
-  const audits = lhr.audits || {};
-  const categories = lhr.categories || {};
-  const fieldMetrics = ((_a2 = rawJson == null ? void 0 : rawJson.loadingExperience) == null ? void 0 : _a2.metrics) || {};
-  const strategy = String(((_b = lhr.configSettings) == null ? void 0 : _b.formFactor) || requestedStrategy || "mobile").toLowerCase();
-  const finalUrl = String(lhr.finalDisplayedUrl || lhr.finalUrl || (rawJson == null ? void 0 : rawJson.id) || requestedUrl);
-  const titleAuditValue = String(
-    ((_f = (_e = (_d = (_c = audits["document-title"]) == null ? void 0 : _c.details) == null ? void 0 : _d.items) == null ? void 0 : _e[0]) == null ? void 0 : _f.title) || ((_g = lhr.fullPageScreenshot) == null ? void 0 : _g.title) || ""
-  );
-  const passwordProtected = /\/password(\?|$|#)/i.test(finalUrl) || /storefront password|enter using password/i.test(titleAuditValue) || ((_h = lhr.runtimeError) == null ? void 0 : _h.code) === "ERRORED_DOCUMENT_REQUEST";
-  const lcpMs = ((_i = audits["largest-contentful-paint"]) == null ? void 0 : _i.numericValue) ?? null;
-  const fcpMs = ((_j = audits["first-contentful-paint"]) == null ? void 0 : _j.numericValue) ?? null;
-  const clsVal = ((_k = audits["cumulative-layout-shift"]) == null ? void 0 : _k.numericValue) ?? null;
-  const tbtMs = ((_l = audits["total-blocking-time"]) == null ? void 0 : _l.numericValue) ?? null;
-  const ttfbMs = ((_m = audits["server-response-time"]) == null ? void 0 : _m.numericValue) ?? null;
-  const siMs = ((_n = audits["speed-index"]) == null ? void 0 : _n.numericValue) ?? null;
-  const fieldInpMs = ((_o = fieldMetrics == null ? void 0 : fieldMetrics.INTERACTION_TO_NEXT_PAINT) == null ? void 0 : _o.percentile) ?? null;
-  const effectiveInpMs = fieldInpMs ?? tbtMs;
-  const lcpElementItem = ((_t = (_s = (_r = (_q = (_p = audits["largest-contentful-paint-element"]) == null ? void 0 : _p.details) == null ? void 0 : _q.items) == null ? void 0 : _r[0]) == null ? void 0 : _s.items) == null ? void 0 : _t[0]) || ((_w = (_v = (_u = audits["largest-contentful-paint-element"]) == null ? void 0 : _u.details) == null ? void 0 : _v.items) == null ? void 0 : _w[0]) || null;
-  const lcpElement = String(
-    ((_x = lcpElementItem == null ? void 0 : lcpElementItem.node) == null ? void 0 : _x.snippet) || ((_y = lcpElementItem == null ? void 0 : lcpElementItem.node) == null ? void 0 : _y.nodeLabel) || ""
-  ).trim().slice(0, 220);
-  const totalBytes = ((_z = audits["total-byte-weight"]) == null ? void 0 : _z.numericValue) ?? null;
-  const candidateAuditIds = Object.keys(audits).filter((id) => {
-    const audit = audits[id];
-    if (!audit || typeof audit.score !== "number") return false;
-    return audit.score < 0.9;
-  });
-  const seoAuditSet = new Set(
-    (((_A = categories.seo) == null ? void 0 : _A.auditRefs) || []).map((ref) => ref.id).filter(Boolean)
-  );
-  const opportunities = [];
-  const seoFindings = [];
-  for (const id of candidateAuditIds) {
-    const audit = audits[id];
-    const isSeo = seoAuditSet.has(id);
-    const guide = AUDIT_GUIDANCE[id];
-    const savingsMs = typeof ((_B = audit.details) == null ? void 0 : _B.overallSavingsMs) === "number" ? Math.round(audit.details.overallSavingsMs) : 0;
-    const savingsBytes = typeof ((_C = audit.details) == null ? void 0 : _C.overallSavingsBytes) === "number" ? Math.round(audit.details.overallSavingsBytes) : 0;
-    if (!isSeo && !guide && savingsMs <= 0 && savingsBytes <= 0 && audit.score >= 0.5) {
-      continue;
-    }
-    const entry2 = {
-      id,
-      title: String(audit.title || id),
-      description: normalizeDescription(audit.description),
-      score: Math.round(audit.score * 100),
-      displayValue: String(audit.displayValue || (savingsMs ? `Est. ${savingsMs} ms savings` : "")),
-      savingsMs,
-      savingsBytes,
-      savingsBytesLabel: formatBytes(savingsBytes),
-      category: isSeo ? "SEO" : (guide == null ? void 0 : guide.metricTarget) || "PERFORMANCE",
-      fixMode: (guide == null ? void 0 : guide.fixMode) || (isSeo ? "IN_APP_AUTO" : "THEME_MANUAL"),
-      inAppTarget: (guide == null ? void 0 : guide.inAppTarget) || "",
-      items: mapAuditItems(audit)
-    };
-    if (isSeo) {
-      seoFindings.push(entry2);
-    } else {
-      opportunities.push(entry2);
-    }
-  }
-  opportunities.sort((a, b) => {
-    const weightA = a.savingsMs + a.savingsBytes / 1e3 + (100 - a.score) * 10;
-    const weightB = b.savingsMs + b.savingsBytes / 1e3 + (100 - b.score) * 10;
-    return weightB - weightA;
-  });
-  seoFindings.sort((a, b) => a.score - b.score);
-  const parsed = {
-    testedUrl: requestedUrl || finalUrl,
-    finalUrl,
-    strategy,
-    fetchTime: lhr.fetchTime || (/* @__PURE__ */ new Date()).toISOString(),
-    runtimeError: ((_D = lhr.runtimeError) == null ? void 0 : _D.message) || "",
-    passwordProtected,
-    hasFieldData: Boolean((fieldMetrics == null ? void 0 : fieldMetrics.LARGEST_CONTENTFUL_PAINT_MS) || (fieldMetrics == null ? void 0 : fieldMetrics.INTERACTION_TO_NEXT_PAINT)),
-    scores: {
-      performance: roundScore((_E = categories.performance) == null ? void 0 : _E.score),
-      seo: roundScore((_F = categories.seo) == null ? void 0 : _F.score),
-      accessibility: roundScore((_G = categories.accessibility) == null ? void 0 : _G.score),
-      bestPractices: roundScore((_H = categories["best-practices"]) == null ? void 0 : _H.score)
-    },
-    metrics: {
-      lcp: {
-        label: "LCP (Largest Contentful Paint)",
-        value: typeof lcpMs === "number" ? Math.round(lcpMs) : null,
-        displayValue: ((_I = audits["largest-contentful-paint"]) == null ? void 0 : _I.displayValue) || formatMs(lcpMs),
-        rating: rateMetric(lcpMs, 2500, 4e3),
-        target: "≤ 2.5 s"
-      },
-      inp: {
-        label: fieldInpMs !== null ? "INP (Real CrUX Field)" : "TBT (INP Lab Proxy)",
-        value: typeof effectiveInpMs === "number" ? Math.round(effectiveInpMs) : null,
-        displayValue: fieldInpMs !== null ? formatMs(fieldInpMs) : ((_J = audits["total-blocking-time"]) == null ? void 0 : _J.displayValue) || formatMs(tbtMs),
-        rating: fieldInpMs !== null ? rateMetric(fieldInpMs, 200, 500) : rateMetric(tbtMs, 200, 600),
-        target: "≤ 200 ms"
-      },
-      cls: {
-        label: "CLS (Cumulative Layout Shift)",
-        value: typeof clsVal === "number" ? Number(clsVal.toFixed(3)) : null,
-        displayValue: ((_K = audits["cumulative-layout-shift"]) == null ? void 0 : _K.displayValue) || (typeof clsVal === "number" ? clsVal.toFixed(3) : "N/A"),
-        rating: rateMetric(clsVal, 0.1, 0.25),
-        target: "≤ 0.10"
-      },
-      fcp: {
-        label: "FCP (First Contentful Paint)",
-        value: typeof fcpMs === "number" ? Math.round(fcpMs) : null,
-        displayValue: ((_L = audits["first-contentful-paint"]) == null ? void 0 : _L.displayValue) || formatMs(fcpMs),
-        rating: rateMetric(fcpMs, 1800, 3e3),
-        target: "≤ 1.8 s"
-      },
-      ttfb: {
-        label: "TTFB (Server Response)",
-        value: typeof ttfbMs === "number" ? Math.round(ttfbMs) : null,
-        displayValue: ((_M = audits["server-response-time"]) == null ? void 0 : _M.displayValue) || formatMs(ttfbMs),
-        rating: rateMetric(ttfbMs, 800, 1800),
-        target: "≤ 800 ms"
-      },
-      si: {
-        label: "Speed Index",
-        value: typeof siMs === "number" ? Math.round(siMs) : null,
-        displayValue: ((_N = audits["speed-index"]) == null ? void 0 : _N.displayValue) || formatMs(siMs),
-        rating: rateMetric(siMs, 3400, 5800),
-        target: "≤ 3.4 s"
-      }
-    },
-    lcpElement,
-    totalBytes,
-    totalBytesLabel: formatBytes(totalBytes) || "N/A",
-    opportunities: opportunities.slice(0, 12),
-    seoFindings: seoFindings.slice(0, 10)
-  };
-  parsed.manualChecklist = buildManualPageSpeedChecklist(parsed);
-  return parsed;
-}
-async function runLivePageSpeedTest({
-  url,
-  shop,
-  strategy = "mobile",
-  apiKey = "",
-  fetchImpl = globalThis.fetch
-}) {
-  var _a2;
-  if (typeof fetchImpl !== "function") {
-    throw new Error("Fetch API is unavailable in this runtime.");
-  }
-  const normalizedUrl = normalizePageSpeedTargetUrl(shop, url);
-  const cleanStrategy = String(strategy || "mobile").toLowerCase() === "desktop" ? "desktop" : "mobile";
-  const params = new URLSearchParams();
-  params.set("url", normalizedUrl);
-  params.set("strategy", cleanStrategy);
-  params.append("category", "performance");
-  params.append("category", "seo");
-  params.append("category", "accessibility");
-  params.append("category", "best-practices");
-  const cleanKey = String(apiKey || "").trim();
-  if (cleanKey) {
-    params.set("key", cleanKey);
-  }
-  const endpoint = `${PAGESPEED_ENDPOINT}?${params.toString()}`;
-  const response = await fetchImpl(endpoint, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(45e3) : void 0
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    const rawMsg = ((_a2 = payload == null ? void 0 : payload.error) == null ? void 0 : _a2.message) || `Google PageSpeed Insights returned HTTP ${response.status}.`;
-    if (response.status === 429) {
-      throw new Error(
-        "Google PageSpeed API public rate limit reached. Add a Google PageSpeed API key in SuperAdmin → AI & API Config (or .env GOOGLE_PAGESPEED_API_KEY) for dedicated quota."
-      );
-    }
-    throw new Error(rawMsg);
-  }
-  return parsePageSpeedApiResponse(payload, normalizedUrl, cleanStrategy);
-}
-const links$8 = () => [{
+const links$9 = () => [{
   rel: "stylesheet",
   href: seoStyles
 }];
@@ -11009,7 +17081,7 @@ async function resolveMatchedProduct({
     return null;
   }
 }
-const loader$a = async ({
+const loader$b = async ({
   request
 }) => {
   var _a2;
@@ -12085,12 +18157,22 @@ const app_pagespeed = UNSAFE_withComponentProps(function PageSpeedDashboardPage(
                 gap: "10px"
               },
               children: [/* @__PURE__ */ jsxs(Link, {
+                to: "/app/image-optimizer?tab=compression",
+                className: "feature-card",
+                children: [/* @__PURE__ */ jsx("h4", {
+                  children: "🗜️ Compress Images"
+                }), /* @__PURE__ */ jsx("p", {
+                  children: "Shrink KB size & cap pixels for PageSpeed LCP (0 AI tokens)."
+                }), /* @__PURE__ */ jsx("span", {
+                  children: "Open"
+                })]
+              }), /* @__PURE__ */ jsxs(Link, {
                 to: "/app/image-optimizer?status=needs-fix",
                 className: "feature-card",
                 children: [/* @__PURE__ */ jsx("h4", {
                   children: "🖼️ Image ALT & Media"
                 }), /* @__PURE__ */ jsx("p", {
-                  children: "Fix missing ALT tags & audit heavy product images."
+                  children: "Fix missing ALT tags & audit product image SEO."
                 }), /* @__PURE__ */ jsx("span", {
                   children: "Open"
                 })]
@@ -12101,16 +18183,6 @@ const app_pagespeed = UNSAFE_withComponentProps(function PageSpeedDashboardPage(
                   children: "🏷️ Bulk Meta Tags"
                 }), /* @__PURE__ */ jsx("p", {
                   children: "Fix missing page titles & meta descriptions manually."
-                }), /* @__PURE__ */ jsx("span", {
-                  children: "Open"
-                })]
-              }), /* @__PURE__ */ jsxs(Link, {
-                to: "/app/robots",
-                className: "feature-card",
-                children: [/* @__PURE__ */ jsx("h4", {
-                  children: "🤖 Robots.txt Crawl"
-                }), /* @__PURE__ */ jsx("p", {
-                  children: "Inspect live crawl directives & fix blocks."
                 }), /* @__PURE__ */ jsx("span", {
                   children: "Open"
                 })]
@@ -12450,10 +18522,10 @@ const route20 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   __proto__: null,
   action: action$8,
   default: app_pagespeed,
-  links: links$8,
-  loader: loader$a
+  links: links$9,
+  loader: loader$b
 }, Symbol.toStringTag, { value: "Module" }));
-const links$7 = () => [{
+const links$8 = () => [{
   rel: "stylesheet",
   href: seoStyles
 }];
@@ -12466,7 +18538,7 @@ function safeJsonParse(raw) {
   }
 }
 const REVISIONS_PAGE_SIZE = 25;
-const loader$9 = async ({
+const loader$a = async ({
   request
 }) => {
   const {
@@ -12582,6 +18654,19 @@ const DIFF_FIELDS = [{
   key: "descriptionHtml",
   label: "Product Description (HTML)"
 }];
+const IMAGE_COMPRESSION_DIFF_FIELDS = [{
+  key: "imageFileSize",
+  label: "Image File Size"
+}, {
+  key: "imageDimensions",
+  label: "Image Dimensions"
+}, {
+  key: "imageFormat",
+  label: "Image Format"
+}, {
+  key: "imageUrl",
+  label: "Image Asset URL"
+}];
 const app_revisions = UNSAFE_withComponentProps(function RevisionsRoute() {
   var _a2, _b, _c;
   const {
@@ -12640,7 +18725,8 @@ const app_revisions = UNSAFE_withComponentProps(function RevisionsRoute() {
           var _a3, _b2, _c2, _d;
           const isOpen = expandedId === rev.id;
           const isRolling = fetcher.state !== "idle" && rollingBackId === rev.id;
-          const changedFields = DIFF_FIELDS.filter((f) => {
+          const activeFields = rev.changeType === "IMAGE_COMPRESSED" ? IMAGE_COMPRESSION_DIFF_FIELDS : DIFF_FIELDS;
+          const changedFields = activeFields.filter((f) => {
             var _a4, _b3;
             return String(((_a4 = rev.before) == null ? void 0 : _a4[f.key]) ?? "") !== String(((_b3 = rev.after) == null ? void 0 : _b3[f.key]) ?? "");
           });
@@ -12740,7 +18826,7 @@ const app_revisions = UNSAFE_withComponentProps(function RevisionsRoute() {
                     })]
                   })
                 }), /* @__PURE__ */ jsx("tbody", {
-                  children: (changedFields.length ? changedFields : DIFF_FIELDS).map((f) => {
+                  children: (changedFields.length ? changedFields : activeFields).map((f) => {
                     var _a4, _b3;
                     return /* @__PURE__ */ jsxs("tr", {
                       children: [/* @__PURE__ */ jsx("td", {
@@ -12822,14 +18908,14 @@ const route21 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   __proto__: null,
   action: action$7,
   default: app_revisions,
-  links: links$7,
-  loader: loader$9
+  links: links$8,
+  loader: loader$a
 }, Symbol.toStringTag, { value: "Module" }));
-const links$6 = () => [{
+const links$7 = () => [{
   rel: "stylesheet",
   href: seoStyles
 }];
-const loader$8 = async ({
+const loader$9 = async ({
   request
 }) => {
   var _a2;
@@ -14804,14 +20890,14 @@ const route22 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   __proto__: null,
   action: action$6,
   default: app_seoAudit,
-  links: links$6,
-  loader: loader$8
+  links: links$7,
+  loader: loader$9
 }, Symbol.toStringTag, { value: "Module" }));
-const links$5 = () => [{
+const links$6 = () => [{
   rel: "stylesheet",
   href: seoStyles
 }];
-const loader$7 = async ({
+const loader$8 = async ({
   request
 }) => {
   const {
@@ -15904,8 +21990,8 @@ const app_products = UNSAFE_withComponentProps(function ProductSeoRoute() {
                       type: "button",
                       onClick: () => runAiFix(row, "full"),
                       disabled: isAiBusy,
-                      title: `Optimizes title, keyword, metadata & writes rich structured description HTML (${CREDIT_COSTS.product_seo_fix} tokens)`,
-                      children: isAiBusy && aiActionLabel === "full" ? "Generating..." : `⚡ AI Full SEO + Content (${CREDIT_COSTS.product_seo_fix} tok)`
+                      title: `Optimizes title, keyword, metadata & writes rich structured description HTML (${CREDIT_COSTS.product_seo_full} tokens)`,
+                      children: isAiBusy && aiActionLabel === "full" ? "Generating..." : `⚡ AI Full SEO + Content (${CREDIT_COSTS.product_seo_full} tok)`
                     }), /* @__PURE__ */ jsx("button", {
                       className: "seo-button secondary",
                       type: "button",
@@ -15981,11 +22067,11 @@ const route23 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   __proto__: null,
   action: action$5,
   default: app_products,
-  links: links$5,
-  loader: loader$7,
+  links: links$6,
+  loader: loader$8,
   shouldRevalidate
 }, Symbol.toStringTag, { value: "Module" }));
-const loader$6 = async () => {
+const loader$7 = async () => {
   return redirect("/app");
 };
 const app_settings = UNSAFE_withComponentProps(function SettingsRemovedRoute() {
@@ -15994,6 +22080,433 @@ const app_settings = UNSAFE_withComponentProps(function SettingsRemovedRoute() {
 const route24 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   default: app_settings,
+  loader: loader$7
+}, Symbol.toStringTag, { value: "Module" }));
+const CALCULATOR_PRESETS = [
+  {
+    id: "starter",
+    label: "Quick Store Tune-Up",
+    counts: {
+      productSeoFixes: 5,
+      productDescriptionFixes: 2,
+      imageCompressions: 10,
+      visionAltImages: 0,
+      chatMessages: 5,
+      aiRobotsFixes: 1,
+      pagespeedAiPlans: 0,
+      copilotBriefs: 0
+    }
+  },
+  {
+    id: "growth",
+    label: "25-Product Refresh",
+    counts: {
+      productSeoFixes: 25,
+      productDescriptionFixes: 10,
+      imageCompressions: 25,
+      visionAltImages: 5,
+      chatMessages: 10,
+      aiRobotsFixes: 1,
+      pagespeedAiPlans: 1,
+      copilotBriefs: 1
+    }
+  },
+  {
+    id: "scale",
+    label: "100-Product Catalog",
+    counts: {
+      productSeoFixes: 100,
+      productDescriptionFixes: 25,
+      imageCompressions: 100,
+      visionAltImages: 25,
+      chatMessages: 20,
+      aiRobotsFixes: 2,
+      pagespeedAiPlans: 1,
+      copilotBriefs: 1
+    }
+  },
+  {
+    id: "reset",
+    label: "Reset (0)",
+    counts: {
+      productSeoFixes: 0,
+      productDescriptionFixes: 0,
+      imageCompressions: 0,
+      visionAltImages: 0,
+      chatMessages: 0,
+      aiRobotsFixes: 0,
+      pagespeedAiPlans: 0,
+      copilotBriefs: 0
+    }
+  }
+];
+const PRICING_CATEGORIES = [
+  "All",
+  "Product SEO",
+  "Images & Speed",
+  "AI Chat & Audits",
+  "Technical SEO",
+  "Free Tools"
+];
+function TokenPricingAndCalculator({
+  id = "token-calculator",
+  creditAccount = null,
+  hasSuperAccess = false,
+  onBillingPage = false,
+  onSelectTopUp = null,
+  locationSearch = "",
+  title = "Token Calculator & Pricing List",
+  subtitle = "Estimate token usage before running bulk catalog SEO fixes, description rewrites, or image compression."
+}) {
+  const baseId = useId();
+  const availableCredits = Number((creditAccount == null ? void 0 : creditAccount.availableCredits) ?? 0);
+  const superAccess = Boolean(hasSuperAccess || (creditAccount == null ? void 0 : creditAccount.superAccess));
+  const [counts, setCounts] = useState(CALCULATOR_PRESETS[0].counts);
+  const [categoryFilter, setCategoryFilter] = useState("All");
+  const summary = useMemo(
+    () => calculateTokenEstimateSummary(counts, availableCredits, superAccess),
+    [counts, availableCredits, superAccess]
+  );
+  const visiblePricing = useMemo(() => {
+    if (categoryFilter === "All") return TOKEN_PRICING_CATALOG;
+    return TOKEN_PRICING_CATALOG.filter((item) => item.category === categoryFilter);
+  }, [categoryFilter]);
+  function handleQtyChange(key, rawValue) {
+    const parsed = rawValue === "" ? 0 : Math.max(0, Math.min(1e4, Math.floor(Number(rawValue) || 0)));
+    setCounts((prev) => ({
+      ...prev,
+      [key]: parsed
+    }));
+  }
+  const billingHref = `/app/billing${locationSearch || ""}`;
+  return /* @__PURE__ */ jsxs("section", { id, className: "section-card token-calc-section", "aria-label": title, children: [
+    /* @__PURE__ */ jsxs("div", { className: "token-calc-header", children: [
+      /* @__PURE__ */ jsxs("div", { children: [
+        /* @__PURE__ */ jsx("h2", { className: "section-title", style: { marginBottom: 4 }, children: title }),
+        /* @__PURE__ */ jsx("p", { className: "seo-subtitle", style: { margin: 0 }, children: subtitle })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "token-calc-balance-badge", children: [
+        /* @__PURE__ */ jsx("span", { children: "Current Balance:" }),
+        /* @__PURE__ */ jsx("strong", { children: superAccess ? "∞ Super Access" : `${availableCredits.toLocaleString()} tokens` })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxs("div", { className: "token-calc-grid", children: [
+      /* @__PURE__ */ jsxs("div", { className: "token-calc-card", children: [
+        /* @__PURE__ */ jsxs("div", { className: "token-calc-card-head", children: [
+          /* @__PURE__ */ jsxs("div", { children: [
+            /* @__PURE__ */ jsx("h3", { children: "Interactive Workload Calculator" }),
+            /* @__PURE__ */ jsx("p", { children: "Adjust quantities to preview total token cost before starting work." })
+          ] }),
+          /* @__PURE__ */ jsx("div", { className: "token-calc-presets", role: "group", "aria-label": "Calculator Presets", children: CALCULATOR_PRESETS.map((preset) => /* @__PURE__ */ jsx(
+            "button",
+            {
+              type: "button",
+              className: "token-preset-btn",
+              onClick: () => setCounts(preset.counts),
+              children: preset.label
+            },
+            preset.id
+          )) })
+        ] }),
+        /* @__PURE__ */ jsx("div", { className: "token-calc-rows", children: summary.items.map((item) => {
+          const inputId = `${baseId}-${item.key}`;
+          return /* @__PURE__ */ jsxs("div", { className: "token-calc-row", children: [
+            /* @__PURE__ */ jsxs("div", { className: "token-calc-row-label", children: [
+              /* @__PURE__ */ jsx("label", { htmlFor: inputId, children: item.label }),
+              /* @__PURE__ */ jsxs("span", { children: [
+                item.rate,
+                " tok / ",
+                item.unit
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxs("div", { className: "token-calc-row-input", children: [
+              /* @__PURE__ */ jsx(
+                "input",
+                {
+                  id: inputId,
+                  type: "number",
+                  min: 0,
+                  max: 1e4,
+                  step: 1,
+                  value: counts[item.key] ?? 0,
+                  onChange: (event) => handleQtyChange(item.key, event.target.value)
+                }
+              ),
+              /* @__PURE__ */ jsxs("span", { className: "token-calc-row-subtotal", children: [
+                item.subtotal.toLocaleString(),
+                " tok"
+              ] })
+            ] })
+          ] }, item.key);
+        }) }),
+        /* @__PURE__ */ jsxs("div", { className: "token-calc-summary-box", children: [
+          /* @__PURE__ */ jsxs("div", { className: "token-calc-summary-main", children: [
+            /* @__PURE__ */ jsxs("div", { children: [
+              /* @__PURE__ */ jsx("span", { className: "token-calc-summary-eyebrow", children: "Estimated Tokens Needed" }),
+              /* @__PURE__ */ jsxs("div", { className: "token-calc-summary-total", children: [
+                /* @__PURE__ */ jsxs("strong", { children: [
+                  summary.billableTokens.toLocaleString(),
+                  " tokens"
+                ] }),
+                superAccess && summary.standardTokens > 0 ? /* @__PURE__ */ jsxs("span", { className: "token-calc-super-note", children: [
+                  "Super Access active (standard rate: ",
+                  summary.standardTokens.toLocaleString(),
+                  " tok)"
+                ] }) : null
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxs("div", { className: "token-calc-summary-balance", children: [
+              /* @__PURE__ */ jsx("span", { children: "After Run:" }),
+              /* @__PURE__ */ jsx(
+                "strong",
+                {
+                  className: summary.coveredByBalance ? "token-status-ok" : "token-status-warn",
+                  children: superAccess ? "∞ Remaining" : summary.coveredByBalance ? `${(summary.availableCredits - summary.billableTokens).toLocaleString()} left` : `Short by ${summary.shortfallTokens.toLocaleString()} tok`
+                }
+              )
+            ] })
+          ] }),
+          !summary.coveredByBalance && summary.recommendedPackage ? /* @__PURE__ */ jsxs("div", { className: "token-calc-shortfall", children: [
+            /* @__PURE__ */ jsxs("span", { children: [
+              "Recommended top-up: ",
+              /* @__PURE__ */ jsx("strong", { children: summary.recommendedPackage.label }),
+              " ($",
+              summary.recommendedPackage.price,
+              ") covers this workload."
+            ] }),
+            onBillingPage && typeof onSelectTopUp === "function" ? /* @__PURE__ */ jsxs(
+              "button",
+              {
+                type: "button",
+                className: "seo-button",
+                onClick: () => onSelectTopUp(summary.recommendedPackage),
+                children: [
+                  "Buy ",
+                  summary.recommendedPackage.label,
+                  " ($",
+                  summary.recommendedPackage.price,
+                  ")"
+                ]
+              }
+            ) : /* @__PURE__ */ jsxs(Link, { className: "seo-button", to: billingHref, children: [
+              "Buy ",
+              summary.recommendedPackage.label,
+              " →"
+            ] })
+          ] }) : /* @__PURE__ */ jsx("div", { className: "token-calc-covered", children: "Your current balance covers this planned batch. Exact tokens are only deducted as items succeed." })
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxs("div", { className: "token-pricing-card", children: [
+        /* @__PURE__ */ jsx("div", { className: "token-calc-card-head", children: /* @__PURE__ */ jsxs("div", { children: [
+          /* @__PURE__ */ jsx("h3", { children: "Action Token Pricing List" }),
+          /* @__PURE__ */ jsx("p", { children: "Exact per-action and per-item rates across AI Mode and store optimizers." })
+        ] }) }),
+        /* @__PURE__ */ jsx("div", { className: "token-pricing-filters", role: "group", "aria-label": "Pricing Category Filter", children: PRICING_CATEGORIES.map((category) => /* @__PURE__ */ jsx(
+          "button",
+          {
+            type: "button",
+            className: `token-filter-chip ${categoryFilter === category ? "active" : ""}`,
+            onClick: () => setCategoryFilter(category),
+            children: category
+          },
+          category
+        )) }),
+        /* @__PURE__ */ jsx("div", { className: "token-pricing-table-wrap", children: /* @__PURE__ */ jsxs("table", { className: "token-pricing-table", children: [
+          /* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsxs("tr", { children: [
+            /* @__PURE__ */ jsx("th", { scope: "col", children: "Action / Feature" }),
+            /* @__PURE__ */ jsx("th", { scope: "col", children: "Unit" }),
+            /* @__PURE__ */ jsx("th", { scope: "col", children: "Tokens" })
+          ] }) }),
+          /* @__PURE__ */ jsx("tbody", { children: visiblePricing.map((row) => /* @__PURE__ */ jsxs("tr", { children: [
+            /* @__PURE__ */ jsxs("th", { scope: "row", children: [
+              /* @__PURE__ */ jsx("div", { className: "token-pricing-name", children: row.label }),
+              /* @__PURE__ */ jsx("div", { className: "token-pricing-desc", children: row.description })
+            ] }),
+            /* @__PURE__ */ jsx("td", { className: "token-pricing-unit", children: row.unit }),
+            /* @__PURE__ */ jsx("td", { className: "token-pricing-cost", children: /* @__PURE__ */ jsx("span", { className: `token-rate-badge ${row.cost === 0 ? "free" : ""}`, children: row.cost === 0 ? "Free (0)" : `${row.cost} tok` }) })
+          ] }, row.key)) })
+        ] }) })
+      ] })
+    ] })
+  ] });
+}
+const links$5 = () => [{
+  rel: "stylesheet",
+  href: seoStyles
+}];
+const loader$6 = async ({
+  request
+}) => {
+  const {
+    configError,
+    shop,
+    token,
+    apiVersion
+  } = await requireShopContext(request);
+  if (configError || !shop) {
+    return {
+      shop: shop || "",
+      configError: configError || "Shopify session required.",
+      aiChatHistory: [],
+      storeSnapshot: null,
+      catalogProducts: [],
+      aiReady: false,
+      aiUnavailableReason: configError || "Shopify session required.",
+      creditAccount: {
+        availableCredits: 0,
+        totalCredits: PLAN_ALLOWANCES.FREE,
+        plan: "FREE",
+        superAccess: false
+      }
+    };
+  }
+  const [appState, creditAccount, storeControl, platformAi, aiAccess, catalogProducts] = await Promise.all([getAppState(shop), getOrCreateCreditAccount(shop), getOrCreateStoreControl(shop), getEffectivePlatformAiSettings(), checkStoreRouteAccess(shop, "ai_features"), loadAiChatCatalogSummary({
+    shop,
+    storeDomain: shop,
+    token,
+    apiVersion,
+    limit: 25
+  })]);
+  const aiReady = Boolean((platformAi == null ? void 0 : platformAi.isEnabled) && (aiAccess == null ? void 0 : aiAccess.allowed));
+  const aiUnavailableReason = !(platformAi == null ? void 0 : platformAi.isEnabled) ? "Platform Gemini AI is disabled in SuperAdmin." : !(aiAccess == null ? void 0 : aiAccess.allowed) ? (aiAccess == null ? void 0 : aiAccess.reason) || "AI Mode is disabled for this store." : "";
+  return {
+    shop,
+    configError: "",
+    aiChatHistory: Array.isArray(appState == null ? void 0 : appState.aiChatHistory) ? appState.aiChatHistory : [],
+    storeSnapshot: buildAiChatStoreContext({
+      shop,
+      appState
+    }),
+    catalogProducts,
+    aiReady,
+    aiUnavailableReason,
+    creditAccount: {
+      availableCredits: creditAccount.availableCredits,
+      totalCredits: creditAccount.effectiveTotal,
+      plan: creditAccount.plan,
+      superAccess: Boolean(storeControl == null ? void 0 : storeControl.superAccess)
+    }
+  };
+};
+const app_aiMode = UNSAFE_withComponentProps(function AiModeRoute() {
+  const data2 = useLoaderData();
+  const location = useLocation();
+  const [liveCreditAccount, setLiveCreditAccount] = useState(data2.creditAccount);
+  useEffect(() => {
+    setLiveCreditAccount(data2.creditAccount);
+  }, [data2.creditAccount]);
+  useEffect(() => {
+    if (typeof window === "undefined") return void 0;
+    const onCredits = (event) => {
+      const detail = (event == null ? void 0 : event.detail) || {};
+      setLiveCreditAccount((prev) => ({
+        ...prev || {},
+        availableCredits: typeof detail.availableCredits === "number" ? detail.availableCredits : (prev == null ? void 0 : prev.availableCredits) ?? 0,
+        totalCredits: typeof detail.totalCredits === "number" ? detail.totalCredits : prev == null ? void 0 : prev.totalCredits,
+        plan: detail.plan || (prev == null ? void 0 : prev.plan),
+        superAccess: detail.superAccess !== void 0 ? Boolean(detail.superAccess) : Boolean(prev == null ? void 0 : prev.superAccess)
+      }));
+    };
+    window.addEventListener("ecomseo:credits-updated", onCredits);
+    return () => window.removeEventListener("ecomseo:credits-updated", onCredits);
+  }, []);
+  return /* @__PURE__ */ jsxs(Fragment, {
+    children: [/* @__PURE__ */ jsx("ui-title-bar", {
+      title: "Full AI Mode — EcomSEO Copilot"
+    }), /* @__PURE__ */ jsxs("main", {
+      className: "seo-wrap ai-mode-page-wrap",
+      children: [/* @__PURE__ */ jsxs("div", {
+        className: "ai-mode-page-topbar",
+        children: [/* @__PURE__ */ jsxs("div", {
+          className: "ai-mode-page-crumb",
+          children: [/* @__PURE__ */ jsx(Link, {
+            to: "/app",
+            className: "seo-button ghost",
+            style: {
+              padding: "6px 10px"
+            },
+            children: "← Back to Dashboard"
+          }), /* @__PURE__ */ jsxs("span", {
+            className: "seo-muted",
+            style: {
+              fontSize: "12px"
+            },
+            children: ["Store: ", /* @__PURE__ */ jsx("strong", {
+              children: data2.shop || "Not connected"
+            })]
+          })]
+        }), /* @__PURE__ */ jsxs("div", {
+          className: "ai-mode-quick-links",
+          children: [/* @__PURE__ */ jsx("a", {
+            href: "#token-calculator",
+            className: "seo-button secondary",
+            style: {
+              padding: "6px 12px",
+              fontSize: "12px"
+            },
+            children: "🧮 Token Calculator & Pricing"
+          }), /* @__PURE__ */ jsx(Link, {
+            to: "/app/seo-audit",
+            className: "seo-button secondary",
+            style: {
+              padding: "6px 12px",
+              fontSize: "12px"
+            },
+            children: "SEO Audit"
+          }), /* @__PURE__ */ jsx(Link, {
+            to: "/app/image-optimizer?tab=compression",
+            className: "seo-button secondary",
+            style: {
+              padding: "6px 12px",
+              fontSize: "12px"
+            },
+            children: "Image Compression"
+          }), /* @__PURE__ */ jsx(Link, {
+            to: "/app/pagespeed",
+            className: "seo-button secondary",
+            style: {
+              padding: "6px 12px",
+              fontSize: "12px"
+            },
+            children: "PageSpeed"
+          }), /* @__PURE__ */ jsx(Link, {
+            to: `/app/billing${location.search || ""}`,
+            className: "seo-button secondary",
+            style: {
+              padding: "6px 12px",
+              fontSize: "12px"
+            },
+            children: "Billing & Top-Ups"
+          })]
+        })]
+      }), data2.configError ? /* @__PURE__ */ jsx("div", {
+        className: "error-box",
+        children: data2.configError
+      }) : null, /* @__PURE__ */ jsx("div", {
+        className: "ai-mode-page-card",
+        children: /* @__PURE__ */ jsx(AiChatPanel, {
+          mode: "page",
+          open: true,
+          initialHistory: data2.aiChatHistory,
+          initialSnapshot: data2.storeSnapshot,
+          initialCatalogProducts: data2.catalogProducts,
+          aiReady: data2.aiReady,
+          aiUnavailableReason: data2.aiUnavailableReason,
+          creditAccount: liveCreditAccount
+        })
+      }), /* @__PURE__ */ jsx(TokenPricingAndCalculator, {
+        id: "token-calculator",
+        creditAccount: liveCreditAccount,
+        hasSuperAccess: Boolean(liveCreditAccount == null ? void 0 : liveCreditAccount.superAccess),
+        locationSearch: location.search
+      })]
+    })]
+  });
+});
+const route25 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+  __proto__: null,
+  default: app_aiMode,
+  links: links$5,
   loader: loader$6
 }, Symbol.toStringTag, { value: "Module" }));
 const PLAN_PRO$1 = "Ecom SEO Pro";
@@ -16186,29 +22699,33 @@ const action$4 = async ({
   }
 };
 const CREDIT_COST_ITEMS = [{
+  key: "ai_chat",
+  label: "AI Chat Reply",
+  defaultCost: CREDIT_COSTS.ai_chat
+}, {
+  key: "image_compression",
+  label: "Image Compression",
+  defaultCost: CREDIT_COSTS.image_compression
+}, {
+  key: "product_seo_fix",
+  label: "Title, Meta & Keyword Fix",
+  defaultCost: CREDIT_COSTS.product_seo_fix
+}, {
   key: "meta_fix",
-  label: "Meta Tag Fix",
+  label: "Meta Tag AI Fix",
   defaultCost: CREDIT_COSTS.meta_fix
 }, {
   key: "product_content_fix",
-  label: "AI Copy Polish / Bullets",
+  label: "Description Fix (HTML)",
   defaultCost: CREDIT_COSTS.product_content_fix
 }, {
-  key: "product_content_expand",
-  label: "Full AI Description (120–190w)",
-  defaultCost: CREDIT_COSTS.product_content_expand
+  key: "product_seo_full",
+  label: "Full SEO + Description",
+  defaultCost: CREDIT_COSTS.product_seo_full
 }, {
   key: "robots_txt_improvement",
   label: "AI Robots.txt Rules",
   defaultCost: CREDIT_COSTS.robots_txt_improvement
-}, {
-  key: "product_seo_minor",
-  label: "Product SEO Minor Polish",
-  defaultCost: CREDIT_COSTS.product_seo_minor
-}, {
-  key: "product_seo_fix",
-  label: "Full Product SEO + Content",
-  defaultCost: CREDIT_COSTS.product_seo_fix
 }, {
   key: "audit_change",
   label: "Gemini Diff Audit",
@@ -16247,6 +22764,7 @@ const app_billing = UNSAFE_withComponentProps(function BillingPage() {
   const submitting = navigation.state === "submitting";
   const actionData = useActionData();
   const location = useLocation();
+  const submit = useSubmit();
   const submittingIntent = (_a2 = navigation.formData) == null ? void 0 : _a2.get("intent");
   const submittingPackageId = (_b = navigation.formData) == null ? void 0 : _b.get("packageId");
   useEffect(() => {
@@ -16507,6 +23025,18 @@ const app_billing = UNSAFE_withComponentProps(function BillingPage() {
             })
           })]
         })]
+      }), /* @__PURE__ */ jsx(TokenPricingAndCalculator, {
+        id: "token-calculator",
+        creditAccount,
+        hasSuperAccess,
+        onBillingPage: true,
+        onSelectTopUp: !hasSuperAccess ? (pkg) => submit({
+          intent: "buyPack",
+          packageId: pkg.id
+        }, {
+          method: "post"
+        }) : null,
+        locationSearch: location.search
       }), !hasSuperAccess ? /* @__PURE__ */ jsxs("div", {
         id: "packages",
         className: "section-card",
@@ -17023,7 +23553,7 @@ const app_billing = UNSAFE_withComponentProps(function BillingPage() {
     })]
   });
 });
-const route25 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+const route26 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   action: action$4,
   default: app_billing,
@@ -17262,7 +23792,7 @@ const app_billing_return = UNSAFE_withComponentProps(function BillingReturnPage(
     })]
   });
 });
-const route26 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+const route27 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   default: app_billing_return,
   links: links$3,
@@ -17598,7 +24128,7 @@ const app_sitemap = UNSAFE_withComponentProps(function SitemapRoute() {
     })]
   });
 });
-const route27 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+const route28 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   action: action$3,
   default: app_sitemap,
@@ -18466,32 +24996,13 @@ function HealthTrendGraph({
     })]
   });
 }
-const route28 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+const route29 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   action: action$2,
   default: app__index,
   links: links$1,
   loader: loader$2
 }, Symbol.toStringTag, { value: "Module" }));
-function aiHandleSuggestion({ title, currentHandle, focusKeyword }) {
-  const base = `${focusKeyword || ""} ${title || ""}`.trim() || currentHandle || "product";
-  return {
-    handle: normalizeHandle(base),
-    rationale: "Generated a lowercase, hyphenated handle from product intent keywords."
-  };
-}
-function aiRobotsImprovement({ currentRules }) {
-  const lines = String(currentRules || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const ensured = new Set(lines);
-  ensured.add("User-agent: *");
-  ensured.add("Disallow: /cart");
-  ensured.add("Disallow: /search");
-  ensured.add("Allow: /");
-  return {
-    robotsTxt: Array.from(ensured).join("\n"),
-    rationale: "Added required disallow rules while preserving broad crawl access for public pages."
-  };
-}
 async function parseInput(request) {
   const type = request.headers.get("content-type") || "";
   if (type.includes("application/json")) {
@@ -18531,9 +25042,11 @@ const loader$1 = async ({
 const action$1 = async ({
   request
 }) => {
-  var _a2, _b, _c, _d, _e;
+  var _a2, _b, _c, _d, _e, _f, _g, _h, _i;
   const {
-    shop
+    shop,
+    token,
+    apiVersion
   } = await requireShopContext(request);
   if (!shop) {
     return {
@@ -18608,7 +25121,117 @@ const action$1 = async ({
         result: result2
       };
     }
-    const hasSuperAccess = Boolean((_a2 = access.control) == null ? void 0 : _a2.superAccess);
+    if (actionType === "get_ai_chat_state") {
+      const [appState2, account, catalogProducts] = await Promise.all([getAppState(shop), getOrCreateCreditAccount(shop), loadAiChatCatalogSummary({
+        shop,
+        storeDomain: shop,
+        token,
+        apiVersion,
+        query: String(payload.query || ""),
+        limit: 25
+      })]);
+      return {
+        ok: true,
+        actionType,
+        aiChatHistory: (appState2 == null ? void 0 : appState2.aiChatHistory) || [],
+        storeSnapshot: buildAiChatStoreContext({
+          shop,
+          appState: appState2
+        }),
+        catalogProducts,
+        creditsRemaining: account.availableCredits,
+        totalCredits: account.effectiveTotal,
+        plan: account.plan,
+        superAccess: Boolean((_a2 = access.control) == null ? void 0 : _a2.superAccess)
+      };
+    }
+    if (actionType === "ai_chat_catalog") {
+      const catalogProducts = await loadAiChatCatalogSummary({
+        shop,
+        storeDomain: shop,
+        token,
+        apiVersion,
+        query: String(payload.query || ""),
+        limit: 25
+      });
+      return {
+        ok: true,
+        actionType,
+        catalogProducts
+      };
+    }
+    if (actionType === "clear_ai_chat_history") {
+      await updateAppState(shop, (current) => ({
+        ...current,
+        aiChatHistory: []
+      }));
+      return {
+        ok: true,
+        actionType,
+        aiChatHistory: []
+      };
+    }
+    if (actionType === "ai_chat_execute") {
+      const hasSuperAccess2 = Boolean((_b = access.control) == null ? void 0 : _b.superAccess);
+      const execAction = payload.action && typeof payload.action === "object" ? payload.action : {};
+      const execution = await executeAiChatFixAction({
+        shop,
+        storeDomain: shop,
+        token,
+        apiVersion,
+        action: execAction,
+        aiSettings,
+        aiAllowed: AI_FEATURES_ENABLED && platformAi.isEnabled && access.allowed,
+        hasSuperAccess: hasSuperAccess2
+      });
+      const confirmationMessage = (execution == null ? void 0 : execution.ok) ? {
+        role: "assistant",
+        content: `✅ ${execution.title || "Action complete"}: ${execution.summary || "Done."}`,
+        actionResult: execution
+      } : {
+        role: "assistant",
+        content: `⚠️ ${(execution == null ? void 0 : execution.error) || "Could not execute that action."}`,
+        actionResult: execution
+      };
+      const aiChatHistory = await appendAiChatMessages(shop, [confirmationMessage], {
+        markActionId: String((execAction == null ? void 0 : execAction.id) || ""),
+        markMessageId: String(payload.messageId || ""),
+        actionResult: execution
+      });
+      const [freshState, freshAccount, freshCatalog] = await Promise.all([getAppState(shop), getOrCreateCreditAccount(shop), loadAiChatCatalogSummary({
+        shop,
+        storeDomain: shop,
+        token,
+        apiVersion,
+        limit: 25
+      })]);
+      return {
+        ok: Boolean(execution == null ? void 0 : execution.ok),
+        actionType,
+        execution,
+        aiChatHistory,
+        storeSnapshot: buildAiChatStoreContext({
+          shop,
+          appState: freshState
+        }),
+        catalogProducts: freshCatalog,
+        outOfCredits: Boolean(execution == null ? void 0 : execution.outOfCredits),
+        error: (execution == null ? void 0 : execution.error) || "",
+        creditsDeducted: Number(((_c = execution == null ? void 0 : execution.creditInfo) == null ? void 0 : _c.creditsDeducted) || 0),
+        creditsRemaining: typeof ((_d = execution == null ? void 0 : execution.creditInfo) == null ? void 0 : _d.creditsRemaining) === "number" ? execution.creditInfo.creditsRemaining : freshAccount.availableCredits,
+        totalCredits: freshAccount.effectiveTotal,
+        plan: freshAccount.plan,
+        superAccess: hasSuperAccess2
+      };
+    }
+    if (actionType === "ai_chat" && !String(payload.message || "").trim()) {
+      return {
+        ok: false,
+        actionType,
+        error: "Please enter a message or pick a quick prompt."
+      };
+    }
+    const hasSuperAccess = Boolean((_e = access.control) == null ? void 0 : _e.superAccess);
     const actionCost = resolveActionCreditCost(actionType, payload);
     const creditCheck = await checkCreditBalance(shop, actionType, actionCost);
     if (!hasSuperAccess && !creditCheck.allowed) {
@@ -18694,7 +25317,7 @@ const action$1 = async ({
         });
       }
     } else if (actionType === "catalog_cannibalization") {
-      const groups = ((_c = (_b = appState == null ? void 0 : appState.lastScan) == null ? void 0 : _b.summary) == null ? void 0 : _c.cannibalizedGroups) || [];
+      const groups = ((_g = (_f = appState == null ? void 0 : appState.lastScan) == null ? void 0 : _f.summary) == null ? void 0 : _g.cannibalizedGroups) || [];
       result = await resolveKeywordCannibalization({
         settings: aiSettings,
         groups
@@ -18706,8 +25329,8 @@ const action$1 = async ({
         storeDomain: shop
       });
     } else if (actionType === "pagespeed_ai_fix") {
-      const mobileReport = payload.mobileReport || ((_d = appState == null ? void 0 : appState.pageSpeed) == null ? void 0 : _d.mobile) || null;
-      const desktopReport = payload.desktopReport || ((_e = appState == null ? void 0 : appState.pageSpeed) == null ? void 0 : _e.desktop) || null;
+      const mobileReport = payload.mobileReport || ((_h = appState == null ? void 0 : appState.pageSpeed) == null ? void 0 : _h.mobile) || null;
+      const desktopReport = payload.desktopReport || ((_i = appState == null ? void 0 : appState.pageSpeed) == null ? void 0 : _i.desktop) || null;
       const targetReport = payload.report || mobileReport || desktopReport;
       if (!targetReport) {
         return {
@@ -18735,6 +25358,44 @@ const action$1 = async ({
           }
         }));
       }
+    } else if (actionType === "ai_chat") {
+      const userMessage = String(payload.message || "").trim();
+      const [appState2, catalogProducts] = await Promise.all([getAppState(shop), loadAiChatCatalogSummary({
+        shop,
+        storeDomain: shop,
+        token,
+        apiVersion,
+        limit: 20
+      })]);
+      const storeSnapshot = buildAiChatStoreContext({
+        shop,
+        appState: appState2
+      });
+      const selectedProduct = payload.selectedProduct && typeof payload.selectedProduct === "object" ? payload.selectedProduct : null;
+      const chatReply = await generateAiChatCopilotReply({
+        settings: aiSettings,
+        storeDomain: shop,
+        userMessage,
+        chatHistory: (appState2 == null ? void 0 : appState2.aiChatHistory) || [],
+        storeSnapshot,
+        selectedProduct,
+        catalogProducts
+      });
+      const aiChatHistory = await appendAiChatMessages(shop, [{
+        role: "user",
+        content: userMessage
+      }, {
+        role: "assistant",
+        content: chatReply.reply,
+        suggestedActions: chatReply.suggestedActions,
+        quickReplies: chatReply.quickReplies,
+        fallbackUsed: Boolean(chatReply.fallbackUsed)
+      }]);
+      result = {
+        ...chatReply,
+        aiChatHistory,
+        storeSnapshot
+      };
     } else {
       return {
         ok: false,
@@ -18757,7 +25418,7 @@ const action$1 = async ({
       actionType,
       customCost: actionCost,
       productId: payload.productId || payload.id,
-      productTitle: payload.title || payload.productTitle || (actionType === "store_copilot" ? "Store-wide Copilot" : null),
+      productTitle: payload.title || payload.productTitle || (actionType === "store_copilot" ? "Store-wide Copilot" : actionType === "ai_chat" ? "AI Mode Chat" : null),
       modelUsed: aiSettings.model || DEFAULT_GEMINI_MODEL,
       bypassLimit: hasSuperAccess
     });
@@ -18777,7 +25438,7 @@ const action$1 = async ({
     };
   }
 };
-const route29 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+const route30 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   action: action$1,
   loader: loader$1
@@ -19111,14 +25772,14 @@ const app_robots = UNSAFE_withComponentProps(function RobotsRoute() {
     })]
   });
 });
-const route30 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+const route31 = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   action,
   default: app_robots,
   links,
   loader
 }, Symbol.toStringTag, { value: "Module" }));
-const serverManifest = { "entry": { "module": "/assets/entry.client-BCcUwNAG.js", "imports": ["/assets/jsx-runtime-BKhq23Iv.js", "/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js"], "css": [] }, "routes": { "root": { "id": "root", "parentId": void 0, "path": "", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": true, "module": "/assets/root-CuC8PCQA.js", "imports": ["/assets/jsx-runtime-BKhq23Iv.js", "/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.customers.data_request": { "id": "routes/webhooks.customers.data_request", "parentId": "root", "path": "webhooks/customers/data_request", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.customers.data_request-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.app.scopes_update": { "id": "routes/webhooks.app.scopes_update", "parentId": "root", "path": "webhooks/app/scopes_update", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.app.scopes_update-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.customers.redact": { "id": "routes/webhooks.customers.redact", "parentId": "root", "path": "webhooks/customers/redact", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.customers.redact-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.app.uninstalled": { "id": "routes/webhooks.app.uninstalled", "parentId": "root", "path": "webhooks/app/uninstalled", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.app.uninstalled-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.products.create": { "id": "routes/webhooks.products.create", "parentId": "root", "path": "webhooks/products/create", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.products.create-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.shop.redact": { "id": "routes/webhooks.shop.redact", "parentId": "root", "path": "webhooks/shop/redact", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.shop.redact-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/api.gsc.callback": { "id": "routes/api.gsc.callback", "parentId": "root", "path": "api/gsc/callback", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/api.gsc.callback-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/auth.login": { "id": "routes/auth.login", "parentId": "root", "path": "auth/login", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/route-Q0W2627K.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/AppProxyProvider-COE77qUW.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/superadmin": { "id": "routes/superadmin", "parentId": "root", "path": "superadmin", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/superadmin-s_8JgpYh.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/superadmin-pOgh_v0_.js", "/assets/toast-sKLOL4Z5.js", "/assets/toast-viewport-DXO4N6m7.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/superadmin._index": { "id": "routes/superadmin._index", "parentId": "routes/superadmin", "path": void 0, "index": true, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/superadmin._index-5SP6rFjk.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/superadmin.login": { "id": "routes/superadmin.login", "parentId": "routes/superadmin", "path": "login", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/superadmin.login-DAUJL0-v.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/superadmin-pOgh_v0_.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/superadmin.users": { "id": "routes/superadmin.users", "parentId": "routes/superadmin", "path": "users", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/superadmin.users-DjMAuEk9.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/superadmin.ai": { "id": "routes/superadmin.ai", "parentId": "routes/superadmin", "path": "ai", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/superadmin.ai-D27xzy8z.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/_index": { "id": "routes/_index", "parentId": "root", "path": void 0, "index": true, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/route-DaMFI0kI.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js"], "css": ["/assets/route-Xpdx9QZl.css"], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/auth.$": { "id": "routes/auth.$", "parentId": "root", "path": "auth/*", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/auth._-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app": { "id": "routes/app", "parentId": "root", "path": "app", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": true, "module": "/assets/app-DFJpeKBA.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/AppProxyProvider-COE77qUW.js", "/assets/seo-D9hJKExZ.js", "/assets/toast-sKLOL4Z5.js", "/assets/seo-ui-CnrZcN6m.js", "/assets/toast-viewport-DXO4N6m7.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.url-optimization": { "id": "routes/app.url-optimization", "parentId": "routes/app", "path": "url-optimization", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.url-optimization-DrGcPBsn.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js", "/assets/seo-ui-CnrZcN6m.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.image-optimizer": { "id": "routes/app.image-optimizer", "parentId": "routes/app", "path": "image-optimizer", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.image-optimizer-xU1W8YNr.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js", "/assets/seo-ui-CnrZcN6m.js", "/assets/toast-viewport-DXO4N6m7.js", "/assets/seoValidators-C19qhdxw.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.bulk-meta": { "id": "routes/app.bulk-meta", "parentId": "routes/app", "path": "bulk-meta", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.bulk-meta-Bck6L8tJ.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js", "/assets/seo-ui-CnrZcN6m.js", "/assets/toast-viewport-DXO4N6m7.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.pagespeed": { "id": "routes/app.pagespeed", "parentId": "routes/app", "path": "pagespeed", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.pagespeed-D5VXAD_u.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js", "/assets/seo-ui-CnrZcN6m.js", "/assets/toast-viewport-DXO4N6m7.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.revisions": { "id": "routes/app.revisions", "parentId": "routes/app", "path": "revisions", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.revisions-CTKwn45e.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js", "/assets/seo-ui-CnrZcN6m.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.seo-audit": { "id": "routes/app.seo-audit", "parentId": "routes/app", "path": "seo-audit", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.seo-audit-CYowWpeq.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js", "/assets/seo-ui-CnrZcN6m.js", "/assets/toast-viewport-DXO4N6m7.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.products": { "id": "routes/app.products", "parentId": "routes/app", "path": "products", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.products-BN8mx5Cv.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js", "/assets/seo-ui-CnrZcN6m.js", "/assets/toast-viewport-DXO4N6m7.js", "/assets/credits-CkGtFi8H.js", "/assets/seoValidators-C19qhdxw.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.settings": { "id": "routes/app.settings", "parentId": "routes/app", "path": "settings", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.settings-zJs1_TWV.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.billing": { "id": "routes/app.billing", "parentId": "routes/app", "path": "billing", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.billing-DI8QHyCr.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js", "/assets/toast-viewport-DXO4N6m7.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.billing.return": { "id": "routes/app.billing.return", "parentId": "routes/app.billing", "path": "return", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.billing.return-BiMj82bO.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.sitemap": { "id": "routes/app.sitemap", "parentId": "routes/app", "path": "sitemap", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.sitemap-DQSfiwjx.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js", "/assets/seo-ui-CnrZcN6m.js", "/assets/toast-viewport-DXO4N6m7.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app._index": { "id": "routes/app._index", "parentId": "routes/app", "path": void 0, "index": true, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app._index-C--e8Lzo.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js", "/assets/seo-ui-CnrZcN6m.js", "/assets/toast-viewport-DXO4N6m7.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.api.ai": { "id": "routes/app.api.ai", "parentId": "routes/app", "path": "api/ai", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/app.api.ai-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.robots": { "id": "routes/app.robots", "parentId": "routes/app", "path": "robots", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.robots-BfLggOrB.js", "imports": ["/assets/chunk-4ZMWKKQ3-vwIRs5Tt.js", "/assets/jsx-runtime-BKhq23Iv.js", "/assets/seo-D9hJKExZ.js", "/assets/seo-ui-CnrZcN6m.js", "/assets/toast-viewport-DXO4N6m7.js", "/assets/credits-CkGtFi8H.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 } }, "url": "/assets/manifest-4829e792.js", "version": "4829e792", "sri": void 0 };
+const serverManifest = { "entry": { "module": "/assets/entry.client-BT8bLDT_.js", "imports": ["/assets/jsx-runtime-hqcx6RSL.js", "/assets/chunk-4ZMWKKQ3-CQbKHbo9.js"], "css": [] }, "routes": { "root": { "id": "root", "parentId": void 0, "path": "", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": true, "module": "/assets/root-BOWtVJ8m.js", "imports": ["/assets/jsx-runtime-hqcx6RSL.js", "/assets/chunk-4ZMWKKQ3-CQbKHbo9.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.customers.data_request": { "id": "routes/webhooks.customers.data_request", "parentId": "root", "path": "webhooks/customers/data_request", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.customers.data_request-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.app.scopes_update": { "id": "routes/webhooks.app.scopes_update", "parentId": "root", "path": "webhooks/app/scopes_update", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.app.scopes_update-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.customers.redact": { "id": "routes/webhooks.customers.redact", "parentId": "root", "path": "webhooks/customers/redact", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.customers.redact-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.app.uninstalled": { "id": "routes/webhooks.app.uninstalled", "parentId": "root", "path": "webhooks/app/uninstalled", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.app.uninstalled-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.products.create": { "id": "routes/webhooks.products.create", "parentId": "root", "path": "webhooks/products/create", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.products.create-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/webhooks.shop.redact": { "id": "routes/webhooks.shop.redact", "parentId": "root", "path": "webhooks/shop/redact", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": false, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/webhooks.shop.redact-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/api.gsc.callback": { "id": "routes/api.gsc.callback", "parentId": "root", "path": "api/gsc/callback", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/api.gsc.callback-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/auth.login": { "id": "routes/auth.login", "parentId": "root", "path": "auth/login", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/route-dF7Qfg3a.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/AppProxyProvider-C9-PME0E.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/superadmin": { "id": "routes/superadmin", "parentId": "root", "path": "superadmin", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/superadmin-D5EumKsz.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/superadmin-pOgh_v0_.js", "/assets/toast-sKLOL4Z5.js", "/assets/toast-viewport-C9artKJO.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/superadmin._index": { "id": "routes/superadmin._index", "parentId": "routes/superadmin", "path": void 0, "index": true, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/superadmin._index-BLk3fTIU.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/superadmin.login": { "id": "routes/superadmin.login", "parentId": "routes/superadmin", "path": "login", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/superadmin.login-et28B3o6.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/superadmin-pOgh_v0_.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/superadmin.users": { "id": "routes/superadmin.users", "parentId": "routes/superadmin", "path": "users", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/superadmin.users-xowm6sWI.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/superadmin.ai": { "id": "routes/superadmin.ai", "parentId": "routes/superadmin", "path": "ai", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/superadmin.ai-DMPzEpS1.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/_index": { "id": "routes/_index", "parentId": "root", "path": void 0, "index": true, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/route-B9S33l-U.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js"], "css": ["/assets/route-Xpdx9QZl.css"], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/auth.$": { "id": "routes/auth.$", "parentId": "root", "path": "auth/*", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/auth._-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app": { "id": "routes/app", "parentId": "root", "path": "app", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": true, "module": "/assets/app-D4AcN6xn.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/AppProxyProvider-C9-PME0E.js", "/assets/seo-Cw1EWHx3.js", "/assets/toast-sKLOL4Z5.js", "/assets/ai-chatbox-Bhm2ZGKw.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/toast-viewport-C9artKJO.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.url-optimization": { "id": "routes/app.url-optimization", "parentId": "routes/app", "path": "url-optimization", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.url-optimization-DfiBwqbS.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.image-optimizer": { "id": "routes/app.image-optimizer", "parentId": "routes/app", "path": "image-optimizer", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.image-optimizer-DU440F7o.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/toast-viewport-C9artKJO.js", "/assets/seoValidators-n8Znhy6N.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.bulk-meta": { "id": "routes/app.bulk-meta", "parentId": "routes/app", "path": "bulk-meta", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.bulk-meta-BGXNe4xB.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/toast-viewport-C9artKJO.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.pagespeed": { "id": "routes/app.pagespeed", "parentId": "routes/app", "path": "pagespeed", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.pagespeed-CxMKzOQd.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/toast-viewport-C9artKJO.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.revisions": { "id": "routes/app.revisions", "parentId": "routes/app", "path": "revisions", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.revisions-D7vgLuZH.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.seo-audit": { "id": "routes/app.seo-audit", "parentId": "routes/app", "path": "seo-audit", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.seo-audit-Bdf99ReW.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/toast-viewport-C9artKJO.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.products": { "id": "routes/app.products", "parentId": "routes/app", "path": "products", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.products-LQp_NAls.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/toast-viewport-C9artKJO.js", "/assets/credits-D6pdBd2o.js", "/assets/seoValidators-n8Znhy6N.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.settings": { "id": "routes/app.settings", "parentId": "routes/app", "path": "settings", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.settings-B-Fsi3NQ.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.ai-mode": { "id": "routes/app.ai-mode", "parentId": "routes/app", "path": "ai-mode", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.ai-mode-Dh5OXGMT.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/ai-chatbox-Bhm2ZGKw.js", "/assets/token-pricing-calculator-CHe4jkXY.js", "/assets/credits-D6pdBd2o.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/toast-viewport-C9artKJO.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.billing": { "id": "routes/app.billing", "parentId": "routes/app", "path": "billing", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.billing-H7LYmp0s.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/token-pricing-calculator-CHe4jkXY.js", "/assets/toast-viewport-C9artKJO.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.billing.return": { "id": "routes/app.billing.return", "parentId": "routes/app.billing", "path": "return", "index": void 0, "caseSensitive": void 0, "hasAction": false, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.billing.return-B5HxDrDJ.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.sitemap": { "id": "routes/app.sitemap", "parentId": "routes/app", "path": "sitemap", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.sitemap-o2cuqGui.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/toast-viewport-C9artKJO.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app._index": { "id": "routes/app._index", "parentId": "routes/app", "path": void 0, "index": true, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app._index-CxAZJESk.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/toast-viewport-C9artKJO.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.api.ai": { "id": "routes/app.api.ai", "parentId": "routes/app", "path": "api/ai", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": false, "hasErrorBoundary": false, "module": "/assets/app.api.ai-l0sNRNKZ.js", "imports": [], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 }, "routes/app.robots": { "id": "routes/app.robots", "parentId": "routes/app", "path": "robots", "index": void 0, "caseSensitive": void 0, "hasAction": true, "hasLoader": true, "hasClientAction": false, "hasClientLoader": false, "hasClientMiddleware": false, "hasDefaultExport": true, "hasErrorBoundary": false, "module": "/assets/app.robots-B3dsBM6T.js", "imports": ["/assets/chunk-4ZMWKKQ3-CQbKHbo9.js", "/assets/jsx-runtime-hqcx6RSL.js", "/assets/seo-Cw1EWHx3.js", "/assets/seo-ui-Mf2XvZYe.js", "/assets/toast-viewport-C9artKJO.js", "/assets/credits-D6pdBd2o.js"], "css": [], "clientActionModule": void 0, "clientLoaderModule": void 0, "clientMiddlewareModule": void 0, "hydrateFallbackModule": void 0 } }, "url": "/assets/manifest-8a998f88.js", "version": "8a998f88", "sri": void 0 };
 const assetsBuildDirectory = "build/client";
 const basename = "/";
 const future = { "unstable_optimizeDeps": false, "v8_passThroughRequests": false, "v8_trailingSlashAwareDataRequests": false, "unstable_previewServerPrerendering": false, "v8_middleware": false, "v8_splitRouteModules": false, "v8_viteEnvironmentApi": false };
@@ -19329,13 +25990,21 @@ const routes = {
     caseSensitive: void 0,
     module: route24
   },
+  "routes/app.ai-mode": {
+    id: "routes/app.ai-mode",
+    parentId: "routes/app",
+    path: "ai-mode",
+    index: void 0,
+    caseSensitive: void 0,
+    module: route25
+  },
   "routes/app.billing": {
     id: "routes/app.billing",
     parentId: "routes/app",
     path: "billing",
     index: void 0,
     caseSensitive: void 0,
-    module: route25
+    module: route26
   },
   "routes/app.billing.return": {
     id: "routes/app.billing.return",
@@ -19343,7 +26012,7 @@ const routes = {
     path: "return",
     index: void 0,
     caseSensitive: void 0,
-    module: route26
+    module: route27
   },
   "routes/app.sitemap": {
     id: "routes/app.sitemap",
@@ -19351,7 +26020,7 @@ const routes = {
     path: "sitemap",
     index: void 0,
     caseSensitive: void 0,
-    module: route27
+    module: route28
   },
   "routes/app._index": {
     id: "routes/app._index",
@@ -19359,7 +26028,7 @@ const routes = {
     path: void 0,
     index: true,
     caseSensitive: void 0,
-    module: route28
+    module: route29
   },
   "routes/app.api.ai": {
     id: "routes/app.api.ai",
@@ -19367,7 +26036,7 @@ const routes = {
     path: "api/ai",
     index: void 0,
     caseSensitive: void 0,
-    module: route29
+    module: route30
   },
   "routes/app.robots": {
     id: "routes/app.robots",
@@ -19375,7 +26044,7 @@ const routes = {
     path: "robots",
     index: void 0,
     caseSensitive: void 0,
-    module: route30
+    module: route31
   }
 };
 const allowedActionOrigins = false;

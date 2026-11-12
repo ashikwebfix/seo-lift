@@ -97,6 +97,13 @@ const DIFF_FIELDS = [
   { key: "descriptionHtml", label: "Product Description (HTML)" },
 ];
 
+const IMAGE_COMPRESSION_DIFF_FIELDS = [
+  { key: "imageFileSize", label: "Image File Size" },
+  { key: "imageDimensions", label: "Image Dimensions" },
+  { key: "imageFormat", label: "Image Format" },
+  { key: "imageUrl", label: "Image Asset URL" },
+];
+
 export default function RevisionsRoute() {
   const { configError, revisions, page = 1, totalPages = 1, totalCount = 0 } = useLoaderData();
   const fetcher = useFetcher();
@@ -136,7 +143,9 @@ export default function RevisionsRoute() {
             {revisions.map((rev) => {
               const isOpen = expandedId === rev.id;
               const isRolling = fetcher.state !== "idle" && rollingBackId === rev.id;
-              const changedFields = DIFF_FIELDS.filter(
+              const activeFields =
+                rev.changeType === "IMAGE_COMPRESSED" ? IMAGE_COMPRESSION_DIFF_FIELDS : DIFF_FIELDS;
+              const changedFields = activeFields.filter(
                 (f) => String(rev.before?.[f.key] ?? "") !== String(rev.after?.[f.key] ?? ""),
               );
 
@@ -197,7 +206,7 @@ export default function RevisionsRoute() {
                           </tr>
                         </thead>
                         <tbody>
-                          {(changedFields.length ? changedFields : DIFF_FIELDS).map((f) => (
+                          {(changedFields.length ? changedFields : activeFields).map((f) => (
                             <tr key={f.key}>
                               <td><strong>{f.label}</strong></td>
                               <td style={{ background: "#fff5f5", color: "#8a2b2b", wordBreak: "break-word" }}>

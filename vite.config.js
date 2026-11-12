@@ -55,4 +55,7 @@ export default defineConfig({
   optimizeDeps: {
     include: ["@shopify/app-bridge-react"],
   },
+  ssr: {
+    external: ["sharp"],
+  },
 });
